@@ -17,6 +17,7 @@ tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 wasm-bindgen = { version = "0.2.106", optional = true }
 lofty = { version = "0.25.2", optional = true }
 musicbrainz_rs = { version = "0.14.0", optional = true }
+thaw = { version = "0.5.0-beta", features = ["ssr"] }
 
 [features]
 hydrate = [
