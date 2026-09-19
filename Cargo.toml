@@ -15,7 +15,8 @@ leptos_axum = { version = "0.8.0", optional = true }
 leptos_meta = { version = "0.8.0" }
 tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 wasm-bindgen = { version = "0.2.106", optional = true }
-lofty = "0.25.2"
+lofty = { version = "0.25.2", optional = true }
+musicbrainz_rs = { version = "0.14.0", optional = true }
 
 [features]
 hydrate = [
@@ -27,6 +28,8 @@ ssr = [
     "dep:axum",
     "dep:tokio",
     "dep:leptos_axum",
+    "dep:lofty",
+    "dep:musicbrainz_rs",
     "leptos/ssr",
     "leptos_meta/ssr",
     "leptos_router/ssr",
