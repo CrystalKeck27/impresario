@@ -22,6 +22,7 @@
         libxkbcommon
         libGL
         cargo-leptos
+        leptosfmt
       ];
       shellHook = ''
         export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${builtins.toString (pkgs.lib.makeLibraryPath buildInputs)}";
