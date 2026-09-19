@@ -15,6 +15,9 @@
         rustfmt
         clippy
         rust-analyzer
+        lld
+        binaryen
+        dart-sass
         wayland
         libxkbcommon
         libGL
