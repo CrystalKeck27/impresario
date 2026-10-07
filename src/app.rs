@@ -4,7 +4,13 @@ use leptos_router::{
     components::{Route, Router, Routes},
     StaticSegment,
 };
-use thaw::*;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FileEntry {
+    pub name: String,
+    pub is_directory: bool,
+}
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
     view! {
@@ -68,58 +74,189 @@ fn HomePage() -> impl IntoView {
 fn FilesPage() -> impl IntoView {
     view! {
         <h1>"Files Page"</h1>
-        <FileList path="."/>
+        <ExplorerView path=".".to_string() />
     }
 }
 
 #[component]
-fn FileList<'a>(path: &'a str) -> impl IntoView {
-    let files = OnceResource::new(fetch_files_in_directory(path.to_string()));
+fn ExplorerView(path: String) -> impl IntoView {
+    let entities = OnceResource::new(fetch_files_in_directory(path.clone()));
 
-    let files_suspense = move || {
+    let suspense = move || {
         Suspend::new(async move {
-            files.await.map(|file_names| {
-                if file_names.is_empty() {
-                    Either::Left(view! { <p>"No files found."</p> })
-                } else {
-                    Either::Right(
-                        file_names.into_iter().map(|file_name| {
-                            view! { <TreeItem item_type=TreeItemType::Branch>{file_name}</TreeItem> }
-                        }).collect::<Vec<_>>()
-                    )
-                }
-            }).map_err(|e| e.to_string())
+            entities
+                .await
+                .map(|entries| {
+                    if entries.is_empty() {
+                        Either::Left(view! { <p>"No files found."</p> })
+                    } else {
+                        Either::Right(
+                            entries
+                                .into_iter()
+                                .map(|entry| {
+                                    let item_path = format!("{}/{}", path, entry.name);
+                                    let item_name = entry.name.clone();
+                                    let item_name_clone = item_name.clone();
+                                    if entry.is_directory {
+                                        Either::Left(view! {
+                                            <DirectoryItem
+                                                name=item_name_clone
+                                                path=item_path
+                                                depth=1
+                                            />
+                                        })
+                                    } else {
+                                        Either::Right(view! {
+                                            <tr>
+                                                <td><div style="margin-left: 20px;">{item_name}</div></td>
+                                                <td>"File"</td>
+                                            </tr>
+                                        })
+                                    }
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                    }
+                })
+                .map_err(|e| e.to_string())
         })
     };
 
     view! {
-        <div>
+        <div class="explorer-view">
             <Transition fallback=|| view! { <p>"Loading files..."</p> }>
                 <ErrorBoundary fallback=|_error| view! { <p>"Error loading files: "</p> }>
-                <Tree>
-                    {files_suspense()}
-                </Tree>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>"Name"</th>
+                                <th>"Type"</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {suspense()}
+                        </tbody>
+                    </table>
                 </ErrorBoundary>
             </Transition>
         </div>
     }
 }
 
-/// Fetches files in a directory and returns a list of file names. This function is only available on the server side.
+#[component]
+fn DirectoryItem(name: String, path: String, depth: usize) -> impl IntoView {
+    let path_clone = path.clone();
+    let is_expanded = RwSignal::new(false);
+    let style_string = format!(
+        "width: {}px; display: inline-block; float: left; height: 1px; text-align: right;",
+        depth * 20
+    );
+
+    view! {
+        <tr on:click=move |_| {
+            is_expanded.set(!is_expanded.get());
+        }>
+            <td style=""><div style={style_string}>{move || if is_expanded.get() { "▼" } else { "►" }}</div><div>{name}</div></td>
+            <td>{move || if is_expanded.get() { "Expanded" } else { "Collapsed" }}</td>
+        </tr>
+        <Show when=move || is_expanded.get()>
+            <Subdirectory path=&path_clone depth=depth + 1 />
+        </Show>
+    }
+}
+
+#[component]
+fn Subdirectory<'a>(path: &'a str, depth: usize) -> impl IntoView {
+    let path_clone = path.to_string();
+    let entries = Resource::new(
+        move || true,
+        move |is_ex| {
+            let p = path_clone.clone();
+            async move {
+                if is_ex {
+                    fetch_files_in_directory(p.to_string())
+                        .await
+                        .unwrap_or_default()
+                } else {
+                    vec![]
+                }
+            }
+        },
+    );
+
+    let suspense = move || {
+        let path_clone = path.to_string();
+        Suspend::new(async move {
+            let entries = entries.await;
+            if entries.is_empty() {
+                Either::Left(())
+            } else {
+                Either::Right(
+                    entries
+                        .into_iter()
+                        .map(|entry| {
+                            let item_path = format!("{}/{}", path_clone, entry.name);
+                            let item_name = entry.name.clone();
+                            let item_name_clone = item_name.clone();
+                            if entry.is_directory {
+                                Either::Left(view! {
+                                    <DirectoryItem
+                                        name=item_name_clone
+                                        path=item_path
+                                        depth=depth
+                                    />
+                                })
+                            } else {
+                                Either::Right(view! {
+                                    <tr>
+                                        <td><div style={format!("margin-left: {}px;", depth * 20)}>{item_name}</div></td>
+                                        <td>"File"</td>
+                                    </tr>
+                                })
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                    )
+            }
+        })
+    };
+
+    view! {
+        {suspense()}
+    }
+    .into_any()
+}
+
+/// Fetches files and directories recursively and returns a list of file entries. This function is only available on the server side.
 #[server]
-pub async fn fetch_files_in_directory(path: String) -> Result<Vec<String>, ServerFnError<String>> {
+pub async fn fetch_files_in_directory(
+    path: String,
+) -> Result<Vec<FileEntry>, ServerFnError<String>> {
     use std::fs;
 
     let entries = fs::read_dir(path).map_err(|e| ServerFnError::ServerError(e.to_string()))?;
-    let mut file_names = Vec::new();
+    let mut file_entries = Vec::new();
 
     for entry in entries {
         let entry = entry.map_err(|e| ServerFnError::ServerError(e.to_string()))?;
         if let Some(file_name) = entry.file_name().to_str() {
-            file_names.push(file_name.to_string());
+            let is_directory = entry.metadata().map(|m| m.is_dir()).unwrap_or(false);
+
+            file_entries.push(FileEntry {
+                name: file_name.to_string(),
+                is_directory,
+            });
         }
     }
 
-    Ok(file_names)
-}
+    // Sort with directories first, then alphabetically
+    file_entries.sort_by(|a, b| {
+        if a.is_directory != b.is_directory {
+            b.is_directory.cmp(&a.is_directory)
+        } else {
+            a.name.cmp(&b.name)
+        }
+    });
 
+    Ok(file_entries)
+}
