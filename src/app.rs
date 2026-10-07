@@ -74,7 +74,7 @@ fn HomePage() -> impl IntoView {
 fn FilesPage() -> impl IntoView {
     view! {
         <h1>"Files Page"</h1>
-        <ExplorerView path=".".to_string() />
+        <ExplorerView path="~/Music".to_string() />
     }
 }
 
@@ -125,7 +125,21 @@ fn ExplorerView(path: String) -> impl IntoView {
     view! {
         <div class="explorer-view">
             <Transition fallback=|| view! { <p>"Loading files..."</p> }>
-                <ErrorBoundary fallback=|_error| view! { <p>"Error loading files: "</p> }>
+                <ErrorBoundary fallback=|errors| {
+                    let message = errors.with(|errors| {
+                        errors
+                            .iter()
+                            .map(|(_, error)| error.to_string())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    });
+                    let display = if message.is_empty() {
+                        "Error loading files.".to_string()
+                    } else {
+                        format!("Error loading files: {message}")
+                    };
+                    view! { <p>{display}</p> }
+                }>
                     <table>
                         <thead>
                             <tr>
@@ -234,11 +248,17 @@ pub async fn fetch_files_in_directory(
 ) -> Result<Vec<FileEntry>, ServerFnError<String>> {
     use std::fs;
 
-    let entries = fs::read_dir(path).map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+    let entries = fs::read_dir(path.clone()).map_err(|e| {
+        eprintln!("Failed to read directory '{}': {}", path, e);
+        ServerFnError::ServerError(e.to_string())
+    })?;
     let mut file_entries = Vec::new();
 
     for entry in entries {
-        let entry = entry.map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+        let entry = entry.map_err(|e| {
+            eprintln!("Failed to read entry in '{}': {}", path, e);
+            ServerFnError::ServerError(e.to_string())
+        })?;
         if let Some(file_name) = entry.file_name().to_str() {
             let is_directory = entry.metadata().map(|m| m.is_dir()).unwrap_or(false);
 
