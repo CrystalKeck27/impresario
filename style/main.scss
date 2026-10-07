@@ -8,3 +8,42 @@ table {
 	border-collapse: collapse;
 	text-align: left;
 }
+
+.explorer-view {
+	width: min(100%, 56rem);
+	margin: 0 auto;
+}
+
+.explorer-view table {
+	width: 100%;
+	table-layout: fixed;
+}
+
+.explorer-view th,
+.explorer-view td {
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.explorer-view thead {
+	background-color: #d9e2ec;
+}
+
+.explorer-view tbody tr:nth-child(odd) {
+	background-color: #f8fafc;
+}
+
+.explorer-view tbody tr:nth-child(even) {
+	background-color: #e9f1f7;
+}
+
+.explorer-view th:first-child,
+.explorer-view td:first-child {
+	width: 70%;
+}
+
+.explorer-view th:last-child,
+.explorer-view td:last-child {
+	width: 30%;
+}
