@@ -72,88 +72,132 @@ fn HomePage() -> impl IntoView {
 /// Renders the files page of your application.
 #[component]
 fn FilesPage() -> impl IntoView {
+    let draft_path = RwSignal::new(".".to_string());
+    let root_path = RwSignal::new(".".to_string());
+
+    let submit_root = move |ev: leptos::ev::SubmitEvent| {
+        ev.prevent_default();
+        root_path.set(draft_path.get());
+    };
+
     view! {
-        <h1>"Files Page"</h1>
-        <ExplorerView path="~/Music".to_string() />
+        <section class="files-page">
+            <header class="files-page__header">
+                <h1>"Files Page"</h1>
+                <form class="root-path-form" on:submit=submit_root>
+                    <label class="root-path-form__label" for="root-path">
+                        "Explorer root"
+                    </label>
+                    <div class="root-path-form__controls">
+                        <input
+                            id="root-path"
+                            class="root-path-form__input"
+                            type="text"
+                            prop:value=move || draft_path.get()
+                            placeholder="Enter a directory path"
+                            on:input=move |ev| draft_path.set(event_target_value(&ev))
+                        />
+                        <button class="root-path-form__button" type="submit">
+                            "Load"
+                        </button>
+                    </div>
+                </form>
+            </header>
+
+            <ExplorerView path=root_path />
+        </section>
     }
 }
 
 #[component]
-fn ExplorerView(path: String) -> impl IntoView {
-    let entities = OnceResource::new(fetch_files_in_directory(path.clone()));
-
-    let suspense = move || {
-        Suspend::new(async move {
-            entities
-                .await
-                .map(|entries| {
-                    if entries.is_empty() {
-                        Either::Left(view! { <p>"No files found."</p> })
-                    } else {
-                        Either::Right(
-                            entries
-                                .into_iter()
-                                .map(|entry| {
-                                    let item_path = format!("{}/{}", path, entry.name);
-                                    let item_name = entry.name.clone();
-                                    let item_name_clone = item_name.clone();
-                                    if entry.is_directory {
-                                        Either::Left(view! {
-                                            <DirectoryItem
-                                                name=item_name_clone
-                                                path=item_path
-                                                depth=1
-                                            />
-                                        })
-                                    } else {
-                                        Either::Right(view! {
-                                            <tr>
-                                                <td><div style="margin-left: 20px;">{item_name}</div></td>
-                                                <td>"File"</td>
-                                            </tr>
-                                        })
-                                    }
-                                })
-                                .collect::<Vec<_>>(),
-                        )
-                    }
-                })
-                .map_err(|e| e.to_string())
-        })
-    };
+fn ExplorerView(path: RwSignal<String>) -> impl IntoView {
+    let entities = Resource::new(
+        move || path.get(),
+        |path| async move {
+            if path.trim().is_empty() {
+                Ok(vec![])
+            } else {
+                fetch_files_in_directory(path).await
+            }
+        },
+    );
 
     view! {
         <div class="explorer-view">
-            <Transition fallback=|| view! { <p>"Loading files..."</p> }>
-                <ErrorBoundary fallback=|errors| {
-                    let message = errors.with(|errors| {
-                        errors
-                            .iter()
-                            .map(|(_, error)| error.to_string())
-                            .collect::<Vec<_>>()
-                            .join("; ")
-                    });
-                    let display = if message.is_empty() {
-                        "Error loading files.".to_string()
-                    } else {
-                        format!("Error loading files: {message}")
-                    };
-                    view! { <p>{display}</p> }
-                }>
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>"Name"</th>
-                                <th>"Type"</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {suspense()}
-                        </tbody>
-                    </table>
-                </ErrorBoundary>
-            </Transition>
+            <p class="explorer-view__root">
+                <strong>"Current root: "</strong>
+                {move || path.get()}
+            </p>
+            <table>
+                <thead>
+                    <tr>
+                        <th>"Name"</th>
+                        <th>"Type"</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <Transition fallback=move || view! {
+                        <StatusRow message="Loading files..." />
+                    }>
+                        {move || {
+                            let current_path = path.get();
+
+                            match entities.get() {
+                                None => Either::Left(view! {
+                                    <StatusRow message="Loading files..." />
+                                }),
+                                Some(Err(error)) => Either::Left(view! {
+                                    <StatusRow message=format!("Error loading files: {error}") />
+                                }),
+                                Some(Ok(_)) if current_path.trim().is_empty() => {
+                                    Either::Left(view! {
+                                        <StatusRow message="Enter a directory path to begin." />
+                                    })
+                                }
+                                Some(Ok(entries)) if entries.is_empty() => Either::Left(view! {
+                                    <StatusRow message="No files found." />
+                                }),
+                                Some(Ok(entries)) => Either::Right(
+                                    entries
+                                        .into_iter()
+                                        .map(|entry| {
+                                            let item_path = format!("{}/{}", current_path, entry.name);
+                                            let item_name = entry.name.clone();
+                                            let item_name_clone = item_name.clone();
+                                            if entry.is_directory {
+                                                Either::Left(view! {
+                                                    <DirectoryItem
+                                                        name=item_name_clone
+                                                        path=item_path
+                                                        depth=1
+                                                    />
+                                                })
+                                            } else {
+                                                Either::Right(view! {
+                                                    <tr>
+                                                        <td><div style="margin-left: 20px;">{item_name}</div></td>
+                                                        <td>"File"</td>
+                                                    </tr>
+                                                })
+                                            }
+                                        })
+                                        .collect::<Vec<_>>(),
+                                ),
+                            }
+                        }}
+                    </Transition>
+                </tbody>
+            </table>
         </div>
+    }
+}
+
+#[component]
+fn StatusRow(#[prop(into)] message: String) -> impl IntoView {
+    view! {
+        <tr>
+            <td colspan="2" class="explorer-view__status">{message}</td>
+        </tr>
     }
 }
 
