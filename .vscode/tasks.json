@@ -1,0 +1,32 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "cargo leptos watch",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "leptos",
+                "watch"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "isBackground": true,
+            "problemMatcher": {
+                "pattern": {
+                    "regexp": "^error.*?([^\\s].*):(\\d+):(\\d+): (.*)$",
+                    "file": 1,
+                    "location": 2,
+                    "message": 4
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "^.*leptos watch.*$",
+                    "endsPattern": "^.*Watching for file changes.*$"
+                }
+            }
+        }
+    ]
+}
