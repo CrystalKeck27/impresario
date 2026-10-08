@@ -324,3 +324,22 @@ pub async fn fetch_files_in_directory(
 
     Ok(file_entries)
 }
+
+#[server]
+pub async fn fetch_file_content(path: String) -> Result<Vec<(String, String)>, ServerFnError<String>> {
+    use lofty::file::TaggedFileExt as _;
+
+    let tags = lofty::read_from_path(path);
+
+    let mapped = tags.map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+
+    let tag = match mapped.primary_tag() {
+		Some(primary_tag) => primary_tag,
+		// If the "primary" tag doesn't exist, we just grab the
+		// first tag we can find. Realistically, a tag reader would likely
+		// iterate through the tags to find a suitable one.
+		None => mapped.first_tag().ok_or(ServerFnError::ServerError("No tag found for file".to_string()))?,
+	};
+
+    Ok(tag.items().map(|item| (item.key().map_key(lofty::tag::TagType::VorbisComments).unwrap_or("N/A").to_string(), item.value().clone().into_string().unwrap_or("N/A".to_string()))).collect::<Vec<_>>())
+}
