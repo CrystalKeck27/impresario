@@ -5,6 +5,7 @@ use leptos_router::{
     StaticSegment,
 };
 use serde::{Deserialize, Serialize};
+use symphonia::core::audio::sample;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileEntry {
@@ -464,4 +465,88 @@ pub async fn fetch_file_content(path: String) -> Result<Vec<(String, String)>, S
 	};
 
     Ok(tag.items().map(|item| (item.key().map_key(lofty::tag::TagType::VorbisComments).unwrap_or("N/A").to_string(), item.value().clone().into_string().unwrap_or("N/A".to_string()))).collect::<Vec<_>>())
+}
+
+#[server]
+pub async fn calculate_acoustid(path: String) -> Result<String, ServerFnError<String>> {
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::codecs::audio::AudioDecoderOptions;
+    use symphonia::core::formats::probe::Hint;
+    use symphonia::core::formats::TrackType;
+
+    // Read the audio file and extract raw audio samples using symphonia
+    let file = Box::new(std::fs::File::open(&path).map_err(|e| ServerFnError::ServerError(e.to_string()))?);
+
+    let mss = symphonia::core::io::MediaSourceStream::new(file, Default::default());
+
+
+    // Create a hint to help the format registry guess what format reader is appropriate. In this
+    // example we'll leave it empty.
+    let hint = Hint::new();
+
+    // Use the default options when reading and decoding.
+    let fmt_opts: FormatOptions = Default::default();
+    let meta_opts: MetadataOptions = Default::default();
+    let dec_opts: AudioDecoderOptions = Default::default();
+
+    // Probe the media source stream for a format.
+    // let mut format =
+    //     symphonia::default::get_probe().probe(&hint, mss, fmt_opts, meta_opts).unwrap();
+    let mut format = symphonia::default::get_probe()
+        .probe(&hint, mss, fmt_opts, meta_opts)
+        .expect("unsupported format");
+
+    // Get the default audio track.
+    let track = format.default_track(TrackType::Audio).unwrap();
+
+    // Create a decoder for the track.
+    let mut decoder = symphonia::default::get_codecs()
+        .make_audio_decoder(track.codec_params.as_ref().unwrap().audio().unwrap(), &dec_opts)
+        .unwrap();
+
+    let track_id = track.id;
+
+    let mut samples: Vec<i16> = Default::default();
+    let mut total_sample_count = 0;
+
+    let sample_rate = track.codec_params.as_ref().unwrap().audio().unwrap().sample_rate.unwrap();
+    let channels = track.codec_params.as_ref().unwrap().audio().unwrap().channels.as_ref().unwrap().count() as u16;
+
+    while let Some(packet) = format.next_packet().map_err(|e| ServerFnError::ServerError(e.to_string()))? {
+        // If the packet does not belong to the selected track, skip it.
+        if packet.track_id != track_id {
+            continue;
+        }
+
+        // Decode the packet into audio samples, ignoring any decode errors.
+        match decoder.decode(&packet) {
+            Ok(audio_buf) => {
+                // The decoded audio samples may now be accessed via the generic audio buffer
+                // returned by the decoder. You may match on the buffer to access a sample-format
+                // specific buffer, or use generic routines to copy out the audio samples in the
+                // desired sample format.
+                //
+                // In the example below, we will copy the all the samples into a vector in
+                // the f32 sample format in channel interleaved order.
+
+                // Ensure the vector is large enough to hold all the samples.
+                samples.resize(audio_buf.samples_interleaved(), i16::MIN);
+
+                // Copy the audio samples from the generic audio buffer to the vector in interleaved
+                // order. The sample format to convert to is inferred from the type of the Vec.
+                audio_buf.copy_to_slice_interleaved(&mut samples);
+
+                // Sum up the total number of samples.
+                total_sample_count += samples.len();
+                print!("\rDecoded {total_sample_count} samples");
+            }
+            Err(symphonia::core::errors::Error::DecodeError(_)) => (),
+            Err(_) => break,
+        }
+    }
+
+    let fprint = chromaprint::fingerprint_audio(&samples, sample_rate, channels, chromaprint::Algorithm::default()).map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+    // Placeholder implementation
+    Ok(fprint.encoded().to_string())
 }
