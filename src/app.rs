@@ -5,7 +5,6 @@ use leptos_router::{
     StaticSegment,
 };
 use serde::{Deserialize, Serialize};
-use symphonia::core::audio::sample;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileEntry {
@@ -56,6 +55,7 @@ pub fn App() -> impl IntoView {
                 <Routes fallback=|| "Page not found.".into_view()>
                     <Route path=StaticSegment("") view=HomePage/>
                     <Route path=StaticSegment("files") view=FilesPage/>
+                    <Route path=StaticSegment("base64") view=Base64Page/>
                 </Routes>
             </main>
         </Router>
@@ -73,7 +73,82 @@ fn HomePage() -> impl IntoView {
         <h1>"Welcome to Leptos!"</h1>
         <button on:click=on_click>"Click Me: " {count}</button>
         <a href="/files"><button>"Files"</button></a>
+        <a href="/base64"><button>"i32 to Base64"</button></a>
     }
+}
+
+#[component]
+fn Base64Page() -> impl IntoView {
+    let input = RwSignal::new(String::new());
+    let result = RwSignal::new(None::<String>);
+    let error = RwSignal::new(None::<String>);
+
+    let submit = move |ev: leptos::ev::SubmitEvent| {
+        ev.prevent_default();
+        match encode_i32_list(&input.get()) {
+            Ok(encoded) => {
+                result.set(Some(encoded));
+                error.set(None);
+            }
+            Err(message) => {
+                result.set(None);
+                error.set(Some(message));
+            }
+        }
+    };
+
+    view! {
+        <section class="base64-page">
+            <header class="base64-page__header">
+                <p class="tags-panel__eyebrow">"Converter"</p>
+                <h1>"i32 list to Base64"</h1>
+                <p>"Enter decimal 32-bit integers separated by commas. Each value is encoded as 4 little-endian bytes before Base64 encoding."</p>
+            </header>
+            <form class="base64-form" on:submit=submit>
+                <label class="root-path-form__label" for="i32-values">"Comma-separated i32 values"</label>
+                <textarea
+                    id="i32-values"
+                    class="base64-form__input"
+                    rows="4"
+                    placeholder="e.g. 1, -2, 2147483647"
+                    prop:value=move || input.get()
+                    on:input=move |ev| input.set(event_target_value(&ev))
+                ></textarea>
+                <button class="root-path-form__button" type="submit">"Convert to Base64"</button>
+            </form>
+            <Show when=move || error.get().is_some()>
+                <p class="base64-page__error" role="alert">{move || error.get().unwrap_or_default()}</p>
+            </Show>
+            <Show when=move || result.get().is_some()>
+                <section class="base64-result" aria-live="polite">
+                    <h2>"Base64 result"</h2>
+                    <code>{move || result.get().unwrap_or_default()}</code>
+                </section>
+            </Show>
+        </section>
+    }
+}
+
+fn encode_i32_list(input: &str) -> Result<String, String> {
+    use base64::Engine as _;
+
+    if input.trim().is_empty() {
+        return Err("Enter at least one decimal i32 value.".to_string());
+    }
+
+    let mut bytes = Vec::new();
+    for (index, value) in input.split(',').enumerate() {
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(format!("Value {} is empty; check the comma-separated list.", index + 1));
+        }
+        let parsed = value.parse::<i32>().map_err(|_| {
+            format!("Value {} ({value}) is not a valid decimal i32.", index + 1)
+        })?;
+        bytes.extend_from_slice(&parsed.to_le_bytes());
+    }
+
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
 /// Renders the files page of your application.
@@ -354,6 +429,15 @@ fn FileTagsPanel(selected_file: RwSignal<Option<String>>) -> impl IntoView {
             }
         },
     );
+    let fingerprint = Resource::new(
+        move || selected_file.get(),
+        |selected_path| async move {
+            match selected_path {
+                Some(path) => calculate_acoustid(path).await,
+                None => Ok(String::new()),
+            }
+        },
+    );
 
     view! {
         <aside class="tags-panel">
@@ -368,6 +452,24 @@ fn FileTagsPanel(selected_file: RwSignal<Option<String>>) -> impl IntoView {
                     }}
                 </p>
             </div>
+
+            <section class="tags-panel__fingerprint">
+                <h3>"AcoustID fingerprint"</h3>
+                <Transition fallback=move || view! {
+                    <p class="tags-panel__status">"Calculating fingerprint..."</p>
+                }>
+                    <div class="tags-panel__fingerprint-value">
+                        {move || match selected_file.get() {
+                            None => "Select an audio track to calculate its fingerprint.".to_string(),
+                            Some(_) => match fingerprint.get() {
+                                None => "Calculating fingerprint...".to_string(),
+                                Some(Err(error)) => format!("Could not calculate fingerprint: {error}"),
+                                Some(Ok(value)) => value,
+                            },
+                        }}
+                    </div>
+                </Transition>
+            </section>
 
             <Transition fallback=move || view! {
                 <p class="tags-panel__status">"Loading tags..."</p>
@@ -490,28 +592,38 @@ pub async fn calculate_acoustid(path: String) -> Result<String, ServerFnError<St
     let meta_opts: MetadataOptions = Default::default();
     let dec_opts: AudioDecoderOptions = Default::default();
 
-    // Probe the media source stream for a format.
-    // let mut format =
-    //     symphonia::default::get_probe().probe(&hint, mss, fmt_opts, meta_opts).unwrap();
     let mut format = symphonia::default::get_probe()
         .probe(&hint, mss, fmt_opts, meta_opts)
-        .expect("unsupported format");
+        .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
 
     // Get the default audio track.
-    let track = format.default_track(TrackType::Audio).unwrap();
+    let track = format
+        .default_track(TrackType::Audio)
+        .ok_or_else(|| ServerFnError::ServerError("No audio track found".to_string()))?;
 
     // Create a decoder for the track.
+    let codec_params = track
+        .codec_params
+        .as_ref()
+        .and_then(|params| params.audio())
+        .ok_or_else(|| ServerFnError::ServerError("No audio codec parameters found".to_string()))?;
     let mut decoder = symphonia::default::get_codecs()
-        .make_audio_decoder(track.codec_params.as_ref().unwrap().audio().unwrap(), &dec_opts)
-        .unwrap();
+        .make_audio_decoder(codec_params, &dec_opts)
+        .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
 
     let track_id = track.id;
 
     let mut samples: Vec<i16> = Default::default();
     let mut total_sample_count = 0;
 
-    let sample_rate = track.codec_params.as_ref().unwrap().audio().unwrap().sample_rate.unwrap();
-    let channels = track.codec_params.as_ref().unwrap().audio().unwrap().channels.as_ref().unwrap().count() as u16;
+    let sample_rate = codec_params
+        .sample_rate
+        .ok_or_else(|| ServerFnError::ServerError("Audio sample rate is unavailable".to_string()))?;
+    let channels = codec_params
+        .channels
+        .as_ref()
+        .ok_or_else(|| ServerFnError::ServerError("Audio channel layout is unavailable".to_string()))?
+        .count() as u16;
 
     while let Some(packet) = format.next_packet().map_err(|e| ServerFnError::ServerError(e.to_string()))? {
         // If the packet does not belong to the selected track, skip it.
@@ -530,16 +642,16 @@ pub async fn calculate_acoustid(path: String) -> Result<String, ServerFnError<St
                 // In the example below, we will copy the all the samples into a vector in
                 // the f32 sample format in channel interleaved order.
 
-                // Ensure the vector is large enough to hold all the samples.
-                samples.resize(audio_buf.samples_interleaved(), i16::MIN);
+                let mut packet_samples = vec![i16::MIN; audio_buf.samples_interleaved()];
 
                 // Copy the audio samples from the generic audio buffer to the vector in interleaved
                 // order. The sample format to convert to is inferred from the type of the Vec.
-                audio_buf.copy_to_slice_interleaved(&mut samples);
+                audio_buf.copy_to_slice_interleaved(&mut packet_samples);
 
                 // Sum up the total number of samples.
-                total_sample_count += samples.len();
+                total_sample_count += packet_samples.len();
                 print!("\rDecoded {total_sample_count} samples");
+                samples.extend(packet_samples);
             }
             Err(symphonia::core::errors::Error::DecodeError(_)) => (),
             Err(_) => break,
