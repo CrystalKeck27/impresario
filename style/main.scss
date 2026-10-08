@@ -70,13 +70,24 @@ main {
 }
 
 .explorer-view {
-	width: min(100%, 56rem);
+	width: min(100%, 72rem);
 	margin: 0 auto;
 	padding: 1rem;
 	border: 1px solid #d9e2ec;
 	border-radius: 0.75rem;
 	background: #fff;
 	box-shadow: 0 10px 30px rgba(16, 42, 67, 0.08);
+}
+
+.explorer-view__layout {
+	display: grid;
+	grid-template-columns: minmax(0, 2fr) minmax(18rem, 1fr);
+	gap: 1rem;
+	align-items: start;
+}
+
+.explorer-view__browser {
+	min-width: 0;
 }
 
 .explorer-view__root {
@@ -100,12 +111,25 @@ main {
 	background-color: #d9e2ec;
 }
 
+.explorer-view tbody tr {
+	cursor: default;
+	transition: background-color 150ms ease;
+}
+
 .explorer-view tbody tr:nth-child(odd) {
 	background-color: #f8fafc;
 }
 
 .explorer-view tbody tr:nth-child(even) {
 	background-color: #e9f1f7;
+}
+
+.explorer-view tbody tr.selected {
+	background: #bfd9ff;
+}
+
+.explorer-view tbody tr:hover {
+	background: #dcebff;
 }
 
 .explorer-view th:first-child,
@@ -118,6 +142,70 @@ main {
 	width: 30%;
 }
 
+.tags-panel {
+	padding: 1rem;
+	border: 1px solid #d9e2ec;
+	border-radius: 0.75rem;
+	background: linear-gradient(180deg, #f8fbff 0%, #eef4fb 100%);
+	min-height: 100%;
+}
+
+.tags-panel__header h2 {
+	margin: 0.25rem 0 0.5rem;
+}
+
+.tags-panel__eyebrow {
+	margin: 0;
+	font-size: 0.8rem;
+	font-weight: 700;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: #486581;
+}
+
+.tags-panel__path {
+	margin: 0;
+	font-size: 0.95rem;
+	line-height: 1.5;
+	color: #334e68;
+	word-break: break-word;
+}
+
+.tags-panel__status {
+	margin: 1rem 0 0;
+	color: #486581;
+	line-height: 1.5;
+}
+
+.tags-panel__list {
+	margin: 1rem 0 0;
+	display: grid;
+	gap: 0.75rem;
+}
+
+.tags-panel__item {
+	padding: 0.75rem;
+	border-radius: 0.65rem;
+	background: rgba(255, 255, 255, 0.8);
+	border: 1px solid rgba(159, 179, 200, 0.7);
+}
+
+.tags-panel__item dt {
+	font-size: 0.8rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: #486581;
+	margin-bottom: 0.25rem;
+}
+
+.tags-panel__item dd {
+	margin: 0;
+	color: #102a43;
+	word-break: break-word;
+	line-height: 1.45;
+}
+
 @media (max-width: 640px) {
 	.root-path-form__controls {
 		flex-direction: column;
@@ -125,5 +213,9 @@ main {
 
 	.root-path-form__button {
 		width: 100%;
+	}
+
+	.explorer-view__layout {
+		grid-template-columns: 1fr;
 	}
 }

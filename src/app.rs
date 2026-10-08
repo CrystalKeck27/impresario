@@ -12,6 +12,12 @@ pub struct FileEntry {
     pub is_directory: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct FileTag {
+    key: String,
+    value: String,
+}
+
 pub fn shell(options: LeptosOptions) -> impl IntoView {
     view! {
         <!DOCTYPE html>
@@ -111,6 +117,7 @@ fn FilesPage() -> impl IntoView {
 
 #[component]
 fn ExplorerView(path: RwSignal<String>) -> impl IntoView {
+    let selected_file = RwSignal::new(None::<String>);
     let entities = Resource::new(
         move || path.get(),
         |path| async move {
@@ -124,70 +131,79 @@ fn ExplorerView(path: RwSignal<String>) -> impl IntoView {
 
     view! {
         <div class="explorer-view">
-            <p class="explorer-view__root">
-                <strong>"Current root: "</strong>
-                {move || path.get()}
-            </p>
-            <table>
-                <thead>
-                    <tr>
-                        <th>"Name"</th>
-                        <th>"Type"</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <Transition fallback=move || view! {
-                        <StatusRow message="Loading files..." />
-                    }>
-                        {move || {
-                            let current_path = path.get();
+            <div class="explorer-view__layout">
+                <section class="explorer-view__browser">
+                    <p class="explorer-view__root">
+                        <strong>"Current root: "</strong>
+                        {move || path.get()}
+                    </p>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>"Name"</th>
+                                <th>"Type"</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <Transition fallback=move || view! {
+                                <StatusRow message="Loading files..." />
+                            }>
+                                {move || {
+                                    let current_path = path.get();
 
-                            match entities.get() {
-                                None => Either::Left(view! {
-                                    <StatusRow message="Loading files..." />
-                                }),
-                                Some(Err(error)) => Either::Left(view! {
-                                    <StatusRow message=format!("Error loading files: {error}") />
-                                }),
-                                Some(Ok(_)) if current_path.trim().is_empty() => {
-                                    Either::Left(view! {
-                                        <StatusRow message="Enter a directory path to begin." />
-                                    })
-                                }
-                                Some(Ok(entries)) if entries.is_empty() => Either::Left(view! {
-                                    <StatusRow message="No files found." />
-                                }),
-                                Some(Ok(entries)) => Either::Right(
-                                    entries
-                                        .into_iter()
-                                        .map(|entry| {
-                                            let item_path = format!("{}/{}", current_path, entry.name);
-                                            let item_name = entry.name.clone();
-                                            let item_name_clone = item_name.clone();
-                                            if entry.is_directory {
-                                                Either::Left(view! {
-                                                    <DirectoryItem
-                                                        name=item_name_clone
-                                                        path=item_path
-                                                        depth=1
-                                                    />
+                                    match entities.get() {
+                                        None => Either::Left(view! {
+                                            <StatusRow message="Loading files..." />
+                                        }),
+                                        Some(Err(error)) => Either::Left(view! {
+                                            <StatusRow message=format!("Error loading files: {error}") />
+                                        }),
+                                        Some(Ok(_)) if current_path.trim().is_empty() => {
+                                            Either::Left(view! {
+                                                <StatusRow message="Enter a directory path to begin." />
+                                            })
+                                        }
+                                        Some(Ok(entries)) if entries.is_empty() => Either::Left(view! {
+                                            <StatusRow message="No files found." />
+                                        }),
+                                        Some(Ok(entries)) => Either::Right(
+                                            entries
+                                                .into_iter()
+                                                .map(|entry| {
+                                                    let item_path = format!("{}/{}", current_path, entry.name);
+                                                    let item_name = entry.name.clone();
+                                                    let item_name_clone = item_name.clone();
+                                                    if entry.is_directory {
+                                                        Either::Left(view! {
+                                                            <DirectoryItem
+                                                                name=item_name_clone
+                                                                path=item_path
+                                                                depth=1
+                                                                selected_file
+                                                            />
+                                                        })
+                                                    } else {
+                                                        Either::Right(view! {
+                                                            <FileItem
+                                                                name=item_name
+                                                                path=item_path
+                                                                depth=1
+                                                                selected_file
+                                                            />
+                                                        })
+                                                    }
                                                 })
-                                            } else {
-                                                Either::Right(view! {
-                                                    <tr>
-                                                        <td><div style="margin-left: 20px;">{item_name}</div></td>
-                                                        <td>"File"</td>
-                                                    </tr>
-                                                })
-                                            }
-                                        })
-                                        .collect::<Vec<_>>(),
-                                ),
-                            }
-                        }}
-                    </Transition>
-                </tbody>
-            </table>
+                                                .collect::<Vec<_>>(),
+                                        ),
+                                    }
+                                }}
+                            </Transition>
+                        </tbody>
+                    </table>
+                </section>
+
+                <FileTagsPanel selected_file />
+            </div>
         </div>
     }
 }
@@ -202,7 +218,34 @@ fn StatusRow(#[prop(into)] message: String) -> impl IntoView {
 }
 
 #[component]
-fn DirectoryItem(name: String, path: String, depth: usize) -> impl IntoView {
+fn FileItem(
+    name: String,
+    path: String,
+    depth: usize,
+    selected_file: RwSignal<Option<String>>,
+) -> impl IntoView {
+    let style_string = format!("margin-left: {}px;", depth * 20);
+    let path_for_click = path.clone();
+    let path_for_selected = path.clone();
+
+    view! {
+        <tr
+            class:selected=move || selected_file.get().as_deref() == Some(path_for_selected.as_str())
+            on:click=move |_| selected_file.set(Some(path_for_click.clone()))
+        >
+            <td><div style=style_string>{name}</div></td>
+            <td>"File"</td>
+        </tr>
+    }
+}
+
+#[component]
+fn DirectoryItem(
+    name: String,
+    path: String,
+    depth: usize,
+    selected_file: RwSignal<Option<String>>,
+) -> impl IntoView {
     let path_clone = path.clone();
     let is_expanded = RwSignal::new(false);
     let style_string = format!(
@@ -218,13 +261,17 @@ fn DirectoryItem(name: String, path: String, depth: usize) -> impl IntoView {
             <td>{move || if is_expanded.get() { "Expanded" } else { "Collapsed" }}</td>
         </tr>
         <Show when=move || is_expanded.get()>
-            <Subdirectory path=&path_clone depth=depth + 1 />
+            <Subdirectory path=&path_clone depth=depth + 1 selected_file />
         </Show>
     }
 }
 
 #[component]
-fn Subdirectory<'a>(path: &'a str, depth: usize) -> impl IntoView {
+fn Subdirectory<'a>(
+    path: &'a str,
+    depth: usize,
+    selected_file: RwSignal<Option<String>>,
+) -> impl IntoView {
     let path_clone = path.to_string();
     let entries = Resource::new(
         move || true,
@@ -262,14 +309,17 @@ fn Subdirectory<'a>(path: &'a str, depth: usize) -> impl IntoView {
                                         name=item_name_clone
                                         path=item_path
                                         depth=depth
+                                        selected_file
                                     />
                                 })
                             } else {
                                 Either::Right(view! {
-                                    <tr>
-                                        <td><div style={format!("margin-left: {}px;", depth * 20)}>{item_name}</div></td>
-                                        <td>"File"</td>
-                                    </tr>
+                                    <FileItem
+                                        name=item_name
+                                        path=item_path
+                                        depth=depth
+                                        selected_file
+                                    />
                                 })
                             }
                         })
@@ -283,6 +333,78 @@ fn Subdirectory<'a>(path: &'a str, depth: usize) -> impl IntoView {
         {suspense()}
     }
     .into_any()
+}
+
+#[component]
+fn FileTagsPanel(selected_file: RwSignal<Option<String>>) -> impl IntoView {
+    let tags = Resource::new(
+        move || selected_file.get(),
+        |selected_path| async move {
+            match selected_path {
+                Some(path) => fetch_file_content(path)
+                    .await
+                    .map(|items| {
+                        items
+                            .into_iter()
+                            .map(|(key, value)| FileTag { key, value })
+                            .collect::<Vec<_>>()
+                    }),
+                None => Ok(vec![]),
+            }
+        },
+    );
+
+    view! {
+        <aside class="tags-panel">
+            <div class="tags-panel__header">
+                <p class="tags-panel__eyebrow">"Selected file"</p>
+                <h2>"Tags"</h2>
+                <p class="tags-panel__path">
+                    {move || {
+                        selected_file
+                            .get()
+                            .unwrap_or_else(|| "Choose a file in the explorer to inspect its tags.".to_string())
+                    }}
+                </p>
+            </div>
+
+            <Transition fallback=move || view! {
+                <p class="tags-panel__status">"Loading tags..."</p>
+            }>
+                {move || match selected_file.get() {
+                    None => Either::Left(view! {
+                        <p class="tags-panel__status">{"Choose a file in the explorer to inspect its tags.".to_string()}</p>
+                    }),
+                    Some(_) => match tags.get() {
+                        None => Either::Left(view! {
+                            <p class="tags-panel__status">{"Loading tags...".to_string()}</p>
+                        }),
+                        Some(Err(error)) => Either::Left(view! {
+                            <p class="tags-panel__status">{format!("Could not read tags: {error}")}</p>
+                        }),
+                        Some(Ok(file_tags)) if file_tags.is_empty() => Either::Left(view! {
+                            <p class="tags-panel__status">{"No tags found for this file.".to_string()}</p>
+                        }),
+                        Some(Ok(file_tags)) => Either::Right(view! {
+                            <dl class="tags-panel__list">
+                                {file_tags
+                                    .into_iter()
+                                    .map(|tag| {
+                                        view! {
+                                            <div class="tags-panel__item">
+                                                <dt>{tag.key}</dt>
+                                                <dd>{tag.value}</dd>
+                                            </div>
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()}
+                            </dl>
+                        }),
+                    },
+                }}
+            </Transition>
+        </aside>
+    }
 }
 
 /// Fetches files and directories recursively and returns a list of file entries. This function is only available on the server side.
