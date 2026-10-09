@@ -39,6 +39,22 @@
                     "endsPattern": "^.*Watching for file changes.*$"
                 }
             }
+        },
+        {
+            "label": "cargo leptos end-to-end",
+            "type": "shell",
+            "command": "sh",
+            "args": [
+                "-c",
+                "cd end2end && npm ci && cd .. && cargo leptos end-to-end"
+            ],
+            "dependsOn": "kill processes on port 3000",
+            "dependsOrder": "sequence",
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "problemMatcher": []
         }
     ]
 }
