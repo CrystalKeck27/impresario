@@ -337,6 +337,15 @@ fn Subdirectory<'a>(
 
 #[component]
 fn FileTagsPanel(selected_file: RwSignal<Option<String>>) -> impl IntoView {
+    let fingerprint = Resource::new(
+        move || selected_file.get(),
+        |selected_path| async move {
+            match selected_path {
+                Some(path) => fetch_acoustid_fingerprint(path).await,
+                None => Ok(String::new()),
+            }
+        },
+    );
     let tags = Resource::new(
         move || selected_file.get(),
         |selected_path| async move {
@@ -368,8 +377,33 @@ fn FileTagsPanel(selected_file: RwSignal<Option<String>>) -> impl IntoView {
                 </p>
             </div>
 
-            <Transition fallback=move || view! {
-                <p class="tags-panel__status">"Loading tags..."</p>
+            <section class="tags-panel__fingerprint">
+                <h3>"AcoustID fingerprint"</h3>
+                <Suspense fallback=move || view! {
+                    <p class="tags-panel__status">{"Calculating fingerprint...".to_string()}</p>
+                }>
+                    {move || match selected_file.get() {
+                        None => Either::Left(view! {
+                            <p class="tags-panel__status">{"Choose a file to calculate its fingerprint.".to_string()}</p>
+                        }),
+                        Some(_) => match fingerprint.get() {
+                            None => Either::Left(view! {
+                                <p class="tags-panel__status">{"Calculating fingerprint...".to_string()}</p>
+                            }),
+                            Some(Err(error)) => Either::Left(view! {
+                                <p class="tags-panel__status">{format!("Could not calculate fingerprint: {error}")}</p>
+                            }),
+                            Some(Ok(value)) => Either::Right(view! {
+                                <pre class="tags-panel__fingerprint-value">{value}</pre>
+                            }),
+                        },
+                    }}
+                </Suspense>
+            </section>
+
+            <h3>"Tags"</h3>
+            <Suspense fallback=move || view! {
+                <p class="tags-panel__status">{"Loading tags...".to_string()}</p>
             }>
                 {move || match selected_file.get() {
                     None => Either::Left(view! {
@@ -402,7 +436,7 @@ fn FileTagsPanel(selected_file: RwSignal<Option<String>>) -> impl IntoView {
                         }),
                     },
                 }}
-            </Transition>
+            </Suspense>
         </aside>
     }
 }
@@ -464,4 +498,44 @@ pub async fn fetch_file_content(path: String) -> Result<Vec<(String, String)>, S
 	};
 
     Ok(tag.items().map(|item| (item.key().map_key(lofty::tag::TagType::VorbisComments).unwrap_or("N/A").to_string(), item.value().clone().into_string().unwrap_or("N/A".to_string()))).collect::<Vec<_>>())
+}
+
+#[server]
+pub async fn fetch_acoustid_fingerprint(
+    path: String,
+) -> Result<String, ServerFnError<String>> {
+    use std::{fs, process::Stdio};
+    use tokio::process::Command;
+
+    let path = fs::canonicalize(&path)
+        .map_err(|e| ServerFnError::ServerError(format!("Could not access file: {e}")))?;
+    let metadata = fs::metadata(&path)
+        .map_err(|e| ServerFnError::ServerError(format!("Could not access file: {e}")))?;
+    if !metadata.is_file() {
+        return Err(ServerFnError::ServerError(
+            "Fingerprint input must be a file".to_string(),
+        ));
+    }
+
+    let output = Command::new("fpcalc")
+        .arg("-text")
+        .arg("-plain")
+        .arg(path)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|e| ServerFnError::ServerError(format!("Could not run fpcalc: {e}")))?;
+
+    if !output.status.success() {
+        let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(ServerFnError::ServerError(if message.is_empty() {
+            format!("fpcalc exited with status {}", output.status)
+        } else {
+            format!("fpcalc failed: {message}")
+        }));
+    }
+
+    String::from_utf8(output.stdout)
+        .map(|response| response.trim().to_string())
+        .map_err(|e| ServerFnError::ServerError(format!("fpcalc returned invalid UTF-8: {e}")))
 }
