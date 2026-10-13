@@ -18,6 +18,20 @@ struct FileTag {
     value: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AcoustidLookup {
+    fingerprint: String,
+    best_match: Option<AcoustidMatch>,
+    lookup_error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AcoustidMatch {
+    score: Option<f64>,
+    acoustid_id: Option<String>,
+    recording_id: Option<String>,
+}
+
 pub fn shell(options: LeptosOptions) -> impl IntoView {
     view! {
         <!DOCTYPE html>
@@ -324,7 +338,7 @@ fn Subdirectory<'a>(
                             }
                         })
                         .collect::<Vec<_>>(),
-                    )
+                )
             }
         })
     };
@@ -337,12 +351,12 @@ fn Subdirectory<'a>(
 
 #[component]
 fn FileTagsPanel(selected_file: RwSignal<Option<String>>) -> impl IntoView {
-    let fingerprint = Resource::new(
+    let acoustid_match = Resource::new(
         move || selected_file.get(),
         |selected_path| async move {
             match selected_path {
-                Some(path) => fetch_acoustid_fingerprint(path).await,
-                None => Ok(String::new()),
+                Some(path) => fetch_acoustid_match(path).await.map(Some),
+                None => Ok(None),
             }
         },
     );
@@ -350,14 +364,12 @@ fn FileTagsPanel(selected_file: RwSignal<Option<String>>) -> impl IntoView {
         move || selected_file.get(),
         |selected_path| async move {
             match selected_path {
-                Some(path) => fetch_file_content(path)
-                    .await
-                    .map(|items| {
-                        items
-                            .into_iter()
-                            .map(|(key, value)| FileTag { key, value })
-                            .collect::<Vec<_>>()
-                    }),
+                Some(path) => fetch_file_content(path).await.map(|items| {
+                    items
+                        .into_iter()
+                        .map(|(key, value)| FileTag { key, value })
+                        .collect::<Vec<_>>()
+                }),
                 None => Ok(vec![]),
             }
         },
@@ -380,22 +392,94 @@ fn FileTagsPanel(selected_file: RwSignal<Option<String>>) -> impl IntoView {
             <section class="tags-panel__fingerprint">
                 <h3>"AcoustID fingerprint"</h3>
                 <Suspense fallback=move || view! {
-                    <p class="tags-panel__status">{"Calculating fingerprint...".to_string()}</p>
+                    <p class="tags-panel__status">"Calculating fingerprint..."</p>
                 }>
                     {move || match selected_file.get() {
-                        None => Either::Left(view! {
-                            <p class="tags-panel__status">{"Choose a file to calculate its fingerprint.".to_string()}</p>
-                        }),
-                        Some(_) => match fingerprint.get() {
-                            None => Either::Left(view! {
-                                <p class="tags-panel__status">{"Calculating fingerprint...".to_string()}</p>
-                            }),
-                            Some(Err(error)) => Either::Left(view! {
+                        None => view! {
+                            <p class="tags-panel__status">"Choose a file to calculate its fingerprint."</p>
+                        }.into_any(),
+                        Some(_) => match acoustid_match.get() {
+                            None => view! {
+                                <p class="tags-panel__status">"Calculating fingerprint..."</p>
+                            }.into_any(),
+                            Some(Err(error)) => view! {
                                 <p class="tags-panel__status">{format!("Could not calculate fingerprint: {error}")}</p>
-                            }),
-                            Some(Ok(value)) => Either::Right(view! {
-                                <pre class="tags-panel__fingerprint-value">{value}</pre>
-                            }),
+                            }.into_any(),
+                            Some(Ok(None)) => view! {
+                                <p class="tags-panel__status">"Choose a file to calculate its fingerprint."</p>
+                            }.into_any(),
+                            Some(Ok(Some(lookup))) => view! {
+                                <pre class="tags-panel__fingerprint-value">{lookup.fingerprint}</pre>
+                            }.into_any(),
+                        },
+                    }}
+                </Suspense>
+            </section>
+
+            <section class="tags-panel__match">
+                <h3>"Closest AcoustID match"</h3>
+                <Suspense fallback=move || view! {
+                    <p class="tags-panel__status">"Looking up this recording..."</p>
+                }>
+                    {move || match selected_file.get() {
+                        None => view! {
+                            <p class="tags-panel__status">"Choose a file to look up its closest match."</p>
+                        }.into_any(),
+                        Some(_) => match acoustid_match.get() {
+                            None => view! {
+                                <p class="tags-panel__status">"Looking up this recording..."</p>
+                            }.into_any(),
+                            Some(Err(error)) => view! {
+                                <p class="tags-panel__status">{format!("AcoustID lookup failed: {error}")}</p>
+                            }.into_any(),
+                            Some(Ok(None)) => view! {
+                                <p class="tags-panel__status">"No AcoustID match was found."</p>
+                            }.into_any(),
+                            Some(Ok(Some(lookup))) => match lookup.lookup_error {
+                                Some(error) => view! {
+                                    <p class="tags-panel__status">{format!("AcoustID lookup failed: {error}")}</p>
+                                }.into_any(),
+                                None => match lookup.best_match {
+                                None => view! {
+                                    <p class="tags-panel__status">"No AcoustID match was found."</p>
+                                }.into_any(),
+                                Some(result) => {
+                                    let score = result.score
+                                        .map(|score| format!("Match confidence: {:.0}%", score * 100.0));
+                                    let has_acoustid_id = result.acoustid_id.is_some();
+                                    let acoustid_link = result.acoustid_id.map(|id| view! {
+                                        <a
+                                            class="tags-panel__match-link"
+                                            href=format!("https://acoustid.org/track/{id}")
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                        >"Open AcoustID match"</a>
+                                    });
+                                    let musicbrainz_link = result.recording_id.map(|id| view! {
+                                        <a
+                                            class="tags-panel__match-link"
+                                            href=format!("https://musicbrainz.org/recording/{id}")
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                        >"Open MusicBrainz recording"</a>
+                                    });
+                                    view! {
+                                        <div class="tags-panel__match-result">
+                                            {score.map(|score| view! {
+                                                <p class="tags-panel__match-score">{score}</p>
+                                            })}
+                                            {acoustid_link}
+                                            {musicbrainz_link}
+                                            {if !has_acoustid_id {
+                                                Some(view! { <p class="tags-panel__status">"The match did not include an AcoustID track ID."</p> })
+                                            } else {
+                                                None
+                                            }}
+                                        </div>
+                                    }.into_any()
+                                },
+                                },
+                            },
                         },
                     }}
                 </Suspense>
@@ -403,23 +487,23 @@ fn FileTagsPanel(selected_file: RwSignal<Option<String>>) -> impl IntoView {
 
             <h3>"Tags"</h3>
             <Suspense fallback=move || view! {
-                <p class="tags-panel__status">{"Loading tags...".to_string()}</p>
+                <p class="tags-panel__status">"Loading tags..."</p>
             }>
                 {move || match selected_file.get() {
-                    None => Either::Left(view! {
-                        <p class="tags-panel__status">{"Choose a file in the explorer to inspect its tags.".to_string()}</p>
-                    }),
+                    None => view! {
+                        <p class="tags-panel__status">"Choose a file in the explorer to inspect its tags."</p>
+                    }.into_any(),
                     Some(_) => match tags.get() {
-                        None => Either::Left(view! {
-                            <p class="tags-panel__status">{"Loading tags...".to_string()}</p>
-                        }),
-                        Some(Err(error)) => Either::Left(view! {
+                        None => view! {
+                            <p class="tags-panel__status">"Loading tags..."</p>
+                        }.into_any(),
+                        Some(Err(error)) => view! {
                             <p class="tags-panel__status">{format!("Could not read tags: {error}")}</p>
-                        }),
-                        Some(Ok(file_tags)) if file_tags.is_empty() => Either::Left(view! {
-                            <p class="tags-panel__status">{"No tags found for this file.".to_string()}</p>
-                        }),
-                        Some(Ok(file_tags)) => Either::Right(view! {
+                        }.into_any(),
+                        Some(Ok(file_tags)) if file_tags.is_empty() => view! {
+                            <p class="tags-panel__status">"No tags found for this file."</p>
+                        }.into_any(),
+                        Some(Ok(file_tags)) => view! {
                             <dl class="tags-panel__list">
                                 {file_tags
                                     .into_iter()
@@ -433,7 +517,7 @@ fn FileTagsPanel(selected_file: RwSignal<Option<String>>) -> impl IntoView {
                                     })
                                     .collect::<Vec<_>>()}
                             </dl>
-                        }),
+                        }.into_any(),
                     },
                 }}
             </Suspense>
@@ -482,7 +566,9 @@ pub async fn fetch_files_in_directory(
 }
 
 #[server]
-pub async fn fetch_file_content(path: String) -> Result<Vec<(String, String)>, ServerFnError<String>> {
+pub async fn fetch_file_content(
+    path: String,
+) -> Result<Vec<(String, String)>, ServerFnError<String>> {
     use lofty::file::TaggedFileExt as _;
 
     let tags = lofty::read_from_path(path);
@@ -490,22 +576,43 @@ pub async fn fetch_file_content(path: String) -> Result<Vec<(String, String)>, S
     let mapped = tags.map_err(|e| ServerFnError::ServerError(e.to_string()))?;
 
     let tag = match mapped.primary_tag() {
-		Some(primary_tag) => primary_tag,
-		// If the "primary" tag doesn't exist, we just grab the
-		// first tag we can find. Realistically, a tag reader would likely
-		// iterate through the tags to find a suitable one.
-		None => mapped.first_tag().ok_or(ServerFnError::ServerError("No tag found for file".to_string()))?,
-	};
+        Some(primary_tag) => primary_tag,
+        // If the "primary" tag doesn't exist, we just grab the
+        // first tag we can find. Realistically, a tag reader would likely
+        // iterate through the tags to find a suitable one.
+        None => mapped.first_tag().ok_or(ServerFnError::ServerError(
+            "No tag found for file".to_string(),
+        ))?,
+    };
 
-    Ok(tag.items().map(|item| (item.key().map_key(lofty::tag::TagType::VorbisComments).unwrap_or("N/A").to_string(), item.value().clone().into_string().unwrap_or("N/A".to_string()))).collect::<Vec<_>>())
+    Ok(tag
+        .items()
+        .map(|item| {
+            (
+                item.key()
+                    .map_key(lofty::tag::TagType::VorbisComments)
+                    .unwrap_or("N/A")
+                    .to_string(),
+                item.value()
+                    .clone()
+                    .into_string()
+                    .unwrap_or("N/A".to_string()),
+            )
+        })
+        .collect::<Vec<_>>())
 }
 
 #[server]
-pub async fn fetch_acoustid_fingerprint(
-    path: String,
-) -> Result<String, ServerFnError<String>> {
+pub async fn fetch_acoustid_match(path: String) -> Result<AcoustidLookup, ServerFnError<String>> {
+    use acoustid::{AcoustIDClient, Metadata};
     use std::{fs, process::Stdio};
     use tokio::process::Command;
+
+    #[derive(Deserialize)]
+    struct FpcalcOutput {
+        duration: f64,
+        fingerprint: String,
+    }
 
     let path = fs::canonicalize(&path)
         .map_err(|e| ServerFnError::ServerError(format!("Could not access file: {e}")))?;
@@ -518,8 +625,7 @@ pub async fn fetch_acoustid_fingerprint(
     }
 
     let output = Command::new("fpcalc")
-        .arg("-text")
-        .arg("-plain")
+        .arg("-json")
         .arg(path)
         .stdin(Stdio::null())
         .output()
@@ -535,7 +641,107 @@ pub async fn fetch_acoustid_fingerprint(
         }));
     }
 
-    String::from_utf8(output.stdout)
-        .map(|response| response.trim().to_string())
-        .map_err(|e| ServerFnError::ServerError(format!("fpcalc returned invalid UTF-8: {e}")))
+    let fpcalc: FpcalcOutput = serde_json::from_slice(&output.stdout)
+        .map_err(|e| ServerFnError::ServerError(format!("Could not parse fpcalc output: {e}")))?;
+    if !fpcalc.duration.is_finite() || fpcalc.duration <= 0.0 || fpcalc.duration > u32::MAX as f64 {
+        return Err(ServerFnError::ServerError(
+            "fpcalc returned an invalid duration".to_string(),
+        ));
+    }
+
+    let fingerprint = fpcalc.fingerprint;
+    let application_key = std::env::var("ACOUSTID_APPLICATION_KEY")
+        .ok()
+        .filter(|key| !key.trim().is_empty());
+    let (best_match, lookup_error) = match application_key {
+        None => (
+            None,
+            Some("ACOUSTID_APPLICATION_KEY is not set on the server".to_string()),
+        ),
+        Some(key) => match AcoustIDClient::with_application_key(key) {
+            Err(error) => (
+                None,
+                Some(format!("Could not create AcoustID client: {error}")),
+            ),
+            Ok(client) => match client
+                .lookup_by_fingerprint(
+                    fpcalc.duration.round() as u32,
+                    &fingerprint,
+                    &[Metadata::Recordings, Metadata::RecordingIds],
+                )
+                .await
+            {
+                Ok(response) => (best_acoustid_match(response.results), None),
+                Err(error) => (None, Some(error.to_string())),
+            },
+        },
+    };
+
+    Ok(AcoustidLookup {
+        fingerprint,
+        best_match,
+        lookup_error,
+    })
+}
+
+#[cfg(feature = "ssr")]
+fn best_acoustid_match(results: Vec<acoustid::LookupResult>) -> Option<AcoustidMatch> {
+    results
+        .into_iter()
+        .max_by(|left, right| {
+            left.score
+                .unwrap_or(0.0)
+                .total_cmp(&right.score.unwrap_or(0.0))
+        })
+        .map(|result| AcoustidMatch {
+            score: result.score,
+            acoustid_id: result.id,
+            recording_id: result
+                .recordings
+                .into_iter()
+                .find_map(|recording| recording.id),
+        })
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod acoustid_match_tests {
+    use super::best_acoustid_match;
+
+    fn map_response(json: &str) -> Option<super::AcoustidMatch> {
+        let response: acoustid::ApiResponse = serde_json::from_str(json).unwrap();
+        best_acoustid_match(response.results)
+    }
+
+    #[test]
+    fn chooses_highest_score_and_keeps_first_recording_id() {
+        let result = map_response(
+            r#"{
+            "status":"ok",
+            "results":[
+                {"id":"lower","score":0.4,"recordings":[{"id":"recording-lower"}]},
+                {"id":"best","score":0.93,"recordings":[{"title":"No ID"},{"id":"recording-best"}]}
+            ]
+        }"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.acoustid_id.as_deref(), Some("best"));
+        assert_eq!(result.recording_id.as_deref(), Some("recording-best"));
+        assert_eq!(result.score, Some(0.93));
+    }
+
+    #[test]
+    fn tolerates_no_results_and_missing_recording_ids() {
+        assert!(map_response(r#"{"status":"ok","results":[]}"#).is_none());
+
+        let result = map_response(
+            r#"{
+            "status":"ok",
+            "results":[{"id":"track","score":0.8,"recordings":[{"title":"No ID"}]}]
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(result.acoustid_id.as_deref(), Some("track"));
+        assert_eq!(result.recording_id, None);
+    }
 }

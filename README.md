@@ -36,6 +36,8 @@ Additionally, Cargo.toml may need updating as new versions of the dependencies a
 cargo leptos watch
 ```
 
+The server uses Chromaprint's `fpcalc` executable to fingerprint selected audio files and `ACOUSTID_APPLICATION_KEY` to look up matches. Install Chromaprint on the server and set an AcoustID application key in the server environment before running the app. Keep the key out of client-side code and source control.
+
 ## Installing Additional Tools
 
 By default, `cargo-leptos` uses `nightly` Rust, `cargo-generate`, and `sass`. If you run into any trouble, you may need to install one or more of these tools.
@@ -83,8 +85,9 @@ export LEPTOS_SITE_ROOT="site"
 export LEPTOS_SITE_PKG_DIR="pkg"
 export LEPTOS_SITE_ADDR="127.0.0.1:3000"
 export LEPTOS_RELOAD_PORT="3001"
+export ACOUSTID_APPLICATION_KEY="your-acoustid-application-key"
 ```
-Finally, run the server binary.
+Install Chromaprint so `fpcalc` is available on the server's `PATH`, then run the server binary.
 
 ## Licensing
 
