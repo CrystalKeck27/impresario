@@ -667,7 +667,7 @@ pub async fn fetch_acoustid_match(path: String) -> Result<AcoustidLookup, Server
                 .lookup_by_fingerprint(
                     fpcalc.duration.round() as u32,
                     &fingerprint,
-                    &[Metadata::Recordings, Metadata::RecordingIds],
+                    &[Metadata::RecordingIds],
                 )
                 .await
             {
