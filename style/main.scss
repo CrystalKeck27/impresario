@@ -195,6 +195,30 @@ main {
 	word-break: break-all;
 }
 
+.tags-panel__match-result {
+	display: grid;
+	gap: 0.65rem;
+	margin-top: 0.75rem;
+}
+
+.tags-panel__match-score {
+	margin: 0;
+	font-weight: 700;
+	color: #334e68;
+}
+
+.tags-panel__match-link {
+	width: fit-content;
+	color: #0f4c81;
+	font-weight: 600;
+	text-decoration-thickness: 1px;
+	text-underline-offset: 0.15em;
+}
+
+.tags-panel__match-link:hover {
+	color: #102a43;
+}
+
 .tags-panel__list {
 	margin: 1rem 0 0;
 	display: grid;

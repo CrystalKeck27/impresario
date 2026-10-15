@@ -39,6 +39,7 @@ test("files page hydrates without a marker mismatch", async ({ page }) => {
 
   await page.goto("http://localhost:3000/files");
   await expect(page.getByRole("heading", { name: "AcoustID fingerprint" })).toBeVisible();
-  await expect(page.locator("h3").nth(1)).toHaveText("Tags");
+  await expect(page.getByRole("heading", { name: "Closest AcoustID match" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Tags", level: 3 })).toBeVisible();
   await expect.poll(() => hydrationErrors).toEqual([]);
 });
