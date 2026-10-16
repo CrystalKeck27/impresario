@@ -38,6 +38,33 @@ cargo leptos watch
 
 The server uses Chromaprint's `fpcalc` executable to fingerprint selected audio files and `ACOUSTID_APPLICATION_KEY` to look up matches. Install Chromaprint on the server and set an AcoustID application key in the server environment before running the app. Keep the key out of client-side code and source control.
 
+## Local PostgreSQL database
+
+The repository includes a PostgreSQL service for development. The Leptos app still runs on the host; this service only provides the database and is not yet connected to the app.
+
+Enter the Nix development shell to get the Docker CLI and Compose v2 plugin, Podman and its Compose provider, and PostgreSQL client tools. Nix supplies command-line tools, but it does not install or start a container runtime or configure host permissions. Install and enable Docker Engine (including its Compose plugin) or Podman on the host first. On macOS and Windows, the runtime generally needs its own VM. The current flake development shell targets x86_64 Linux.
+
+Copy `.env.example` to `.env` in the repository root. The example credentials are for local development only; never reuse them in production. Compose loads `.env` automatically. Start PostgreSQL with either runtime:
+
+```sh
+docker compose up -d db
+# or
+podman compose up -d db
+```
+
+The database is published only on `127.0.0.1:5432`. Check its health and connect from the host with `psql`:
+
+```sh
+docker compose ps
+psql "$(grep '^DATABASE_URL=' .env | cut -d= -f2-)" -c 'select 1;'
+```
+
+Use `podman compose` instead of `docker compose` for the equivalent Podman commands. Podman's `compose` command delegates to an external provider; this dev shell includes `podman-compose`. If provider selection is ambiguous, set `PODMAN_COMPOSE_PROVIDER=podman-compose` for the command.
+
+Stop the service while preserving its database with `docker compose down` or `podman compose down`. The named volume keeps data across container restarts and recreation. To permanently delete the local database and all its data, run `docker compose down -v` or `podman compose down -v`.
+
+The example `DATABASE_URL` uses `localhost`, which is correct for the host-run app. If the app is later run as a container in this Compose project, it should connect to the database using the service hostname `db` instead. Keep real production credentials in a secrets manager or deployment environment, not in `.env.example` or the Compose file.
+
 ## Installing Additional Tools
 
 By default, `cargo-leptos` uses `nightly` Rust, `cargo-generate`, and `sass`. If you run into any trouble, you may need to install one or more of these tools.
