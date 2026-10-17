@@ -286,8 +286,11 @@ fn IdentifyPage() -> impl IntoView {
                             }).collect::<Vec<_>>();
                             let candidate_links = file.matches.iter().map(|candidate| {
                                 let id = candidate.recording_id.clone();
+                                let score = candidate.score
+                                    .map(|score| format!("{:.0}%", score * 100.0))
+                                    .unwrap_or_else(|| "score unavailable".to_string());
                                 view! {
-                                    <a href=format!("https://musicbrainz.org/recording/{id}") target="_blank" rel="noopener noreferrer">{format!("MusicBrainz: {}", candidate.recording_id)}</a>
+                                    <a href=format!("https://musicbrainz.org/recording/{id}") target="_blank" rel="noopener noreferrer">{format!("{} · {}", candidate.recording_id, score)}</a>
                                 }
                             }).collect::<Vec<_>>();
                             let row_class = match file.status {
