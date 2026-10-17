@@ -65,6 +65,14 @@ Stop the service while preserving its database with `docker compose down` or `po
 
 The example `DATABASE_URL` uses `localhost`, which is correct for the host-run app. If the app is later run as a container in this Compose project, it should connect to the database using the service hostname `db` instead. Keep real production credentials in a secrets manager or deployment environment, not in `.env.example` or the Compose file.
 
+## Identify music
+
+Open `/identify`, enter a source directory and a destination directory on the server, then choose **Run identification**. The scan is recursive and currently considers files with `.mp3`, `.flac`, `.ogg`, `.opus`, `.m4a`, `.mp4`, `.aac`, `.wav`, `.aiff`, `.aif`, `.wma`, `.ape`, and `.wv` extensions (case-insensitive). It uses `fpcalc` and the configured AcoustID key to find MusicBrainz recording IDs.
+
+Destination subdirectories mirror the source directory. For example, `jazz/track.flac` produces `jazz/track.flac.recording.mbid`, containing the selected recording MBID as UTF-8 text. A unique recording match is written automatically; multiple distinct recording IDs require choosing one in the page. No recording ID is shown as not found. Existing sidecars with the same ID are treated as already written, while differing contents require an explicit **Replace sidecar** confirmation. The destination cannot be inside the source directory.
+
+Both paths refer to the machine running the Leptos server, not the browser user's local filesystem. Only run this filesystem feature in a trusted environment; the server must have access to the chosen paths.
+
 ## Installing Additional Tools
 
 By default, `cargo-leptos` uses `nightly` Rust, `cargo-generate`, and `sass`. If you run into any trouble, you may need to install one or more of these tools.
