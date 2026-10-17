@@ -4,6 +4,7 @@ const baseRoutes = [
   { path: "/", heading: "Welcome to Leptos!" },
   { path: "/files", heading: "Files Page" },
   { path: "/identify", heading: "Identify music" },
+  { path: "/group", heading: "Group tracks" },
 ];
 
 for (const route of baseRoutes) {
@@ -51,4 +52,12 @@ test("identify page renders its path inputs and initial file explorer", async ({
   await expect(page.getByLabel("Destination directory")).toBeVisible();
   await expect(page.getByRole("button", { name: "Run identification" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Identify music" })).toBeVisible();
+});
+
+test("group page renders its paths and release search controls", async ({ page }) => {
+  await page.goto("http://localhost:3000/group");
+  await expect(page.getByLabel("Identified source directory")).toBeVisible();
+  await expect(page.getByLabel("Group destination directory")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Find release tracks" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Group tracks" })).toBeVisible();
 });

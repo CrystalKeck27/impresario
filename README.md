@@ -73,6 +73,12 @@ Destination subdirectories mirror the source directory. For example, `jazz/track
 
 Both paths refer to the machine running the Leptos server, not the browser user's local filesystem. Only run this filesystem feature in a trusted environment; the server must have access to the chosen paths.
 
+## Group release tracks
+
+Open `/group` after identification and choose the directory containing `.recording.mbid` sidecars plus a separate destination directory. The page searches MusicBrainz releases and their media for the input recordings, then writes unambiguous `<audio filename>.track.mbid` sidecars into a mirrored directory tree. Release options link to MusicBrainz. A release containing every distinct input recording is preferred, with the largest total track count ranked first; if none covers all inputs, a sole candidate for a recording is selected automatically and multiple candidates remain selectable per file. A release choice is propagated to matching files that have not been manually changed, and manual release or track selections remain in place. Newly resolved manual selections can be saved per file. Repeated recording occurrences must be assigned explicitly.
+
+Grouping requires network access to the MusicBrainz web service. Requests use the application User-Agent and are serialized with at least 1.1 seconds between calls. MusicBrainz errors are shown rather than treated as empty results. Track sidecars with identical contents are idempotent; replacing a different track ID requires confirmation. As with `/identify`, paths are on the server and the destination cannot be inside the source tree. Use this feature only in a trusted environment.
+
 ## Installing Additional Tools
 
 By default, `cargo-leptos` uses `nightly` Rust, `cargo-generate`, and `sass`. If you run into any trouble, you may need to install one or more of these tools.

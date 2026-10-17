@@ -515,6 +515,64 @@ main {
 	border: 0;
 }
 
+.group-page__summary,
+.group-page__recording {
+	color: #486581;
+	font-size: 0.84rem;
+}
+
+.group-page__controls {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.55rem;
+	margin-top: 0.25rem;
+}
+
+.group-page__controls label {
+	display: contents;
+}
+
+.group-page__controls select {
+	max-width: min(100%, 34rem);
+	padding: 0.65rem;
+	border: 1px solid #9fb3c8;
+	border-radius: 0.5rem;
+	background: #fff;
+	font: inherit;
+}
+
+.group-page__controls select:focus {
+	outline: 3px solid rgba(15, 76, 129, 0.2);
+	border-color: #0f4c81;
+}
+
+.group-page__controls button {
+	border: 0;
+	border-radius: 0.6rem;
+	padding: 0.65rem 0.85rem;
+	background: #0f4c81;
+	color: #fff;
+	font: inherit;
+	font-size: 0.88rem;
+	font-weight: 700;
+	cursor: pointer;
+}
+
+.group-page__controls .identify-file__overwrite {
+	background: #78520a;
+}
+
+@media (max-width: 640px) {
+	.group-page__controls,
+	.group-page__controls label,
+	.group-page__controls select,
+	.group-page__controls button {
+		width: 100%;
+		max-width: 100%;
+	}
+}
+
 @media (max-width: 640px) {
 	.root-path-form__controls {
 		flex-direction: column;

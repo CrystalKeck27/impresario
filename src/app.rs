@@ -63,6 +63,53 @@ struct IdentifySaveResult {
     conflict: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct GroupRelease {
+    release_id: String,
+    title: String,
+    date: Option<String>,
+    track_count: usize,
+    complete_input: bool,
+    tracks: Vec<GroupTrack>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct GroupTrack {
+    track_id: String,
+    recording_id: String,
+    title: String,
+    position: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum GroupStatus {
+    Unresolved,
+    Ready,
+    Matched,
+    Conflict,
+    Error,
+    NoRelease,
+    Ambiguous,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct GroupFile {
+    relative_path: String,
+    recording_id: String,
+    status: GroupStatus,
+    releases: Vec<GroupRelease>,
+    selected_release_id: Option<String>,
+    selected_track_id: Option<String>,
+    manual_choice: bool,
+    message: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct GroupScan {
+    files: Vec<GroupFile>,
+    preferred_release_id: Option<String>,
+}
+
 pub fn shell(options: LeptosOptions) -> impl IntoView {
     view! {
         <!DOCTYPE html>
@@ -101,6 +148,7 @@ pub fn App() -> impl IntoView {
                     <Route path=StaticSegment("") view=HomePage/>
                     <Route path=StaticSegment("files") view=FilesPage/>
                     <Route path=StaticSegment("identify") view=IdentifyPage/>
+                    <Route path=StaticSegment("group") view=GroupPage/>
                 </Routes>
             </main>
         </Router>
@@ -119,6 +167,7 @@ fn HomePage() -> impl IntoView {
         <button on:click=on_click>"Click Me: " {count}</button>
         <a href="/files"><button>"Files"</button></a>
         <a href="/identify"><button>"Identify music"</button></a>
+        <a href="/group"><button>"Group tracks"</button></a>
     }
 }
 
@@ -374,6 +423,209 @@ fn IdentifyPage() -> impl IntoView {
             </section>
         </section>
     }
+}
+
+#[component]
+fn GroupPage() -> impl IntoView {
+    let source_path = RwSignal::new("../identified".to_string());
+    let destination_path = RwSignal::new("../grouped".to_string());
+    let files = RwSignal::new(Vec::<GroupFile>::new());
+    let running = RwSignal::new(false);
+    let scanned = RwSignal::new(false);
+    let feedback = RwSignal::new(None::<String>);
+
+    let run_scan = move |_| {
+        running.set(true);
+        scanned.set(false);
+        feedback.set(None);
+        files.set(Vec::new());
+        let source = source_path.get_untracked();
+        let destination = destination_path.get_untracked();
+        leptos::task::spawn_local(async move {
+            match group_directory(source, destination).await {
+                Ok(scan) => files.set(scan.files),
+                Err(error) => feedback.set(Some(error.to_string())),
+            }
+            scanned.set(true);
+            running.set(false);
+        });
+    };
+
+    view! {
+        <Title text="Group tracks · Impresario" />
+        <section class="identify-page group-page">
+            <header class="identify-page__header">
+                <p class="identify-page__eyebrow">"MusicBrainz · Release tracks"</p>
+                <h1>"Group tracks"</h1>
+                <p>"Match identified recordings to release tracks and save track IDs in a mirrored output tree."</p>
+            </header>
+            <div class="identify-controls">
+                <label class="identify-controls__field">
+                    <span>"Identified source directory"</span>
+                    <input type="text" aria-label="Identified source directory" disabled=move || running.get()
+                        prop:value=move || source_path.get() placeholder="/path/to/identified"
+                        on:input=move |ev| { source_path.set(event_target_value(&ev)); scanned.set(false); files.set(Vec::new()); } />
+                </label>
+                <label class="identify-controls__field">
+                    <span>"Destination directory"</span>
+                    <input type="text" aria-label="Group destination directory" disabled=move || running.get()
+                        prop:value=move || destination_path.get() placeholder="/path/to/grouped"
+                        on:input=move |ev| { destination_path.set(event_target_value(&ev)); scanned.set(false); files.set(Vec::new()); } />
+                </label>
+                <button class="identify-controls__run" type="button" on:click=run_scan disabled=move || running.get()>
+                    {move || if running.get() { "Searching…" } else { "Find release tracks" }}
+                </button>
+            </div>
+            <p class="identify-page__note">"Reads *.recording.mbid sidecars recursively. Unambiguous track IDs are saved as <audio filename>.track.mbid; manual selections can be saved per file. Complete releases are ranked by total track count."</p>
+            {move || feedback.get().map(|message| view! { <p class="identify-feedback identify-feedback--error" role="alert">{message}</p> })}
+            <section class="identify-explorer" aria-label="Release grouping results">
+                <div class="identify-explorer__heading">
+                    <div><p class="identify-page__eyebrow">"INPUT RECORDINGS"</p><h2>{move || source_path.get()}</h2></div>
+                    <span class="group-page__summary">{move || if scanned.get() { format!("{} files", files.get().len()) } else { "Not scanned".to_string() }}</span>
+                </div>
+                <div class="identify-file-list">
+                    {move || {
+                        let entries = files.get();
+                        if entries.is_empty() {
+                            return vec![view! { <p class="identify-empty">{if running.get() { "Searching MusicBrainz releases…" } else { "Choose directories, then find release tracks." }}</p> }.into_any()];
+                        }
+                        entries.into_iter().map(|file| {
+                            let path = file.relative_path.clone();
+                            let key = path.clone();
+                            let release_options = file.releases.iter().map(|release| {
+                                let id = release.release_id.clone();
+                                let label = format!("{} · {} tracks{}", release.title, release.track_count, if release.complete_input { " · complete" } else { "" });
+                                view! { <option value=id.clone()>{label}</option> }
+                            }).collect::<Vec<_>>();
+                            let chosen_release = file.selected_release_id.clone().unwrap_or_default();
+                            let chosen_id = file.selected_track_id.clone().unwrap_or_default();
+                            let selected_release = file.releases.iter().find(|release| release.release_id == chosen_release);
+                            let track_candidates = selected_release.map(|release| release.tracks.iter()
+                                .filter(|track| track.recording_id == file.recording_id).cloned().collect::<Vec<_>>()).unwrap_or_default();
+                            let track_options = track_candidates.iter().map(|track| {
+                                let id = track.track_id.clone();
+                                view! { <option value=id.clone()>{format!("{} · {} · track {}", track.title, track.track_id, track.position)}</option> }
+                            }).collect::<Vec<_>>();
+                            let release_links = file.releases.iter().map(|release| {
+                                let id = release.release_id.clone();
+                                view! { <a href=format!("https://musicbrainz.org/release/{id}") target="_blank" rel="noopener noreferrer">{release.title.clone()}</a> }
+                            }).collect::<Vec<_>>();
+                            let status_class = match file.status {
+                                GroupStatus::Matched => "identify-file identify-file--matched",
+                                GroupStatus::Conflict | GroupStatus::Ambiguous | GroupStatus::Unresolved => "identify-file identify-file--multiple",
+                                GroupStatus::Error => "identify-file identify-file--error",
+                                GroupStatus::NoRelease => "identify-file identify-file--not-found",
+                                GroupStatus::Ready => "identify-file identify-file--default",
+                            };
+                            let status = match file.status {
+                                GroupStatus::Matched => "Track ID saved",
+                                GroupStatus::Conflict => "Existing track sidecar differs",
+                                GroupStatus::Error => "Could not search or save",
+                                GroupStatus::NoRelease => "No releases found",
+                                GroupStatus::Ambiguous => "Choose an exact track occurrence",
+                                GroupStatus::Ready => "Track ID ready to save",
+                                GroupStatus::Unresolved => "Choose a release",
+                            };
+                            let release_signal = files;
+                            let release_change = move |ev| {
+                                let selected = event_target_value(&ev);
+                                release_signal.update(|entries| {
+                                    let recording_id = entries.iter().find(|entry| entry.relative_path == key).map(|entry| entry.recording_id.clone());
+                                    let duplicate_count = recording_id.as_ref().map(|id| entries.iter().filter(|entry| &entry.recording_id == id).count()).unwrap_or(0);
+                                    if let Some(entry) = entries.iter_mut().find(|entry| entry.relative_path == key) {
+                                        entry.selected_release_id = if selected.is_empty() { None } else { Some(selected.clone()) };
+                                        entry.manual_choice = true;
+                                        entry.selected_track_id = None;
+                                        let matched = entry.releases.iter().find(|release| release.release_id == selected)
+                                            .map(|release| release.tracks.iter().filter(|track| track.recording_id == entry.recording_id).cloned().collect::<Vec<_>>()).unwrap_or_default();
+                                        let ambiguous = matched.len() > 1 || (duplicate_count > 1 && matched.len() == 1);
+                                        entry.status = if ambiguous { GroupStatus::Ambiguous } else if matched.len() == 1 { GroupStatus::Ready } else { GroupStatus::Unresolved };
+                                        if matched.len() == 1 && !ambiguous { entry.selected_track_id = Some(matched[0].track_id.clone()); }
+                                    }
+                                    if !selected.is_empty() {
+                                        let mut duplicate_counts = std::collections::HashMap::<String, usize>::new();
+                                        for entry in entries.iter() { *duplicate_counts.entry(entry.recording_id.clone()).or_default() += 1; }
+                                        for entry in entries.iter_mut().filter(|entry| !entry.manual_choice) {
+                                            let Some(release) = entry.releases.iter().find(|release| release.release_id == selected) else { continue; };
+                                            let matches = release.tracks.iter().collect::<Vec<_>>();
+                                            if matches.is_empty() { continue; }
+                                            entry.selected_release_id = Some(selected.clone());
+                                            let duplicate_count = duplicate_counts.get(&entry.recording_id).copied().unwrap_or(0);
+                                            let ambiguous = matches.len() > 1 || (duplicate_count > 1 && matches.len() == 1);
+                                            entry.selected_track_id = (matches.len() == 1 && !ambiguous).then(|| matches[0].track_id.clone());
+                                            entry.status = if ambiguous { GroupStatus::Ambiguous } else { GroupStatus::Ready };
+                                        }
+                                    }
+                                });
+                            };
+                            let track_change = move |ev| {
+                                let selected = event_target_value(&ev);
+                                files.update(|entries| if let Some(entry) = entries.iter_mut().find(|entry| entry.relative_path == path) {
+                                    entry.selected_track_id = (!selected.is_empty()).then_some(selected);
+                                    entry.manual_choice = true;
+                                    entry.status = if entry.selected_track_id.is_some() { GroupStatus::Ready } else { GroupStatus::Ambiguous };
+                                });
+                            };
+                            let save_path = file.relative_path.clone();
+                            let can_save = file.selected_track_id.is_some() && file.status != GroupStatus::Matched && file.status != GroupStatus::Conflict;
+                            let conflict = file.status == GroupStatus::Conflict;
+                            view! {
+                                <article class=status_class>
+                                    <div class="identify-file__main"><span class="identify-file__icon" aria-hidden="true">"♫"</span>
+                                        <div class="identify-file__details">
+                                            <strong>{file.relative_path.clone()}</strong>
+                                            <span class="identify-file__status">{status}</span>
+                                            <span class="group-page__recording">{"Recording "}{file.recording_id.clone()} {" · "}{if file.manual_choice { "manual choice" } else { "automatic" }}</span>
+                                            {file.message.map(|message| view! { <span class="identify-file__message">{message}</span> })}
+                                            <div class="group-page__controls">
+                                                <label><span class="identify-sr-only">"Release for "{file.relative_path.clone()}</span>
+                                                    <select aria-label=format!("Release for {}", file.relative_path) prop:value=chosen_release on:change=release_change>
+                                                        <option value="">"Choose a release…"</option>{release_options}
+                                                    </select>
+                                                </label>
+                                                {if track_candidates.len() > 1 || file.status == GroupStatus::Ambiguous { view! { <label><span class="identify-sr-only">"Track for "{file.relative_path.clone()}</span>
+                                                    <select aria-label=format!("Track for {}", file.relative_path) prop:value=chosen_id on:change=track_change>
+                                                        <option value="">"Choose track occurrence…"</option>{track_options}
+                                                    </select></label> }.into_any() } else { ().into_any() }}
+                                                {if can_save { view! { <button type="button" on:click={let path = save_path.clone(); move |_| group_save_from_ui(source_path, destination_path, files, feedback, path.clone(), false)} >"Save track ID"</button> }.into_any() } else { ().into_any() }}
+                                                {if conflict { view! { <button type="button" class="identify-file__overwrite" on:click={let path = save_path.clone(); move |_| group_save_from_ui(source_path, destination_path, files, feedback, path.clone(), true)} >"Replace sidecar"</button> }.into_any() } else { ().into_any() }}
+                                            </div>
+                                            <div class="identify-file__candidate-links">{release_links}</div>
+                                        </div>
+                                    </div>
+                                </article>
+                            }.into_any()
+                        }).collect::<Vec<_>>()
+                    }}
+                </div>
+            </section>
+        </section>
+    }
+}
+
+fn group_save_from_ui(
+    source_path: RwSignal<String>,
+    destination_path: RwSignal<String>,
+    files: RwSignal<Vec<GroupFile>>,
+    feedback: RwSignal<Option<String>>,
+    relative_path: String,
+    overwrite: bool,
+) {
+    let source = source_path.get_untracked();
+    let destination = destination_path.get_untracked();
+    let track_id = files.get_untracked().into_iter()
+        .find(|entry| entry.relative_path == relative_path)
+        .and_then(|entry| entry.selected_track_id);
+    let Some(track_id) = track_id else { return; };
+    leptos::task::spawn_local(async move {
+        match save_track_id(source, destination, relative_path.clone(), track_id, overwrite).await {
+            Ok(conflict) => files.update(|entries| if let Some(entry) = entries.iter_mut().find(|entry| entry.relative_path == relative_path) {
+                entry.status = if conflict { GroupStatus::Conflict } else { GroupStatus::Matched };
+                entry.message = conflict.then(|| "Confirm replacement to overwrite the existing sidecar.".to_string());
+            }),
+            Err(error) => feedback.set(Some(error.to_string())),
+        }
+    });
 }
 
 fn save_identification_from_ui(
@@ -1080,6 +1332,228 @@ async fn identify_directory(
 }
 
 #[server]
+async fn group_directory(
+    source: String,
+    destination: String,
+) -> Result<GroupScan, ServerFnError<String>> {
+    use std::collections::{BTreeSet, HashMap};
+    use musicbrainz_rs::{client::MusicBrainzClient, entity::release::Release, prelude::*};
+    use std::fs;
+
+    let (source_root, destination_root) = prepare_identify_roots(&source, &destination)
+        .map_err(ServerFnError::ServerError)?;
+    let mut sidecars = Vec::new();
+    collect_recording_sidecars(&source_root, &source_root, &mut sidecars)
+        .map_err(ServerFnError::ServerError)?;
+    sidecars.sort();
+    let mut inputs = Vec::new();
+    for sidecar in sidecars {
+        let relative_sidecar = sidecar.strip_prefix(&source_root)
+            .map_err(|error| ServerFnError::ServerError(error.to_string()))?;
+        let relative_text = relative_sidecar.to_string_lossy().replace('\\', "/");
+        let audio_path = relative_text.strip_suffix(".recording.mbid")
+            .ok_or_else(|| ServerFnError::ServerError("Invalid recording sidecar name".to_string()))?;
+        let recording_id = fs::read_to_string(&sidecar)
+            .map_err(|error| ServerFnError::ServerError(format!("Could not read {relative_text}: {error}")))?
+            .trim().to_string();
+        validate_musicbrainz_id(&recording_id).map_err(ServerFnError::ServerError)?;
+        inputs.push((audio_path.to_string(), recording_id));
+    }
+    let distinct_ids: BTreeSet<String> = inputs.iter().map(|(_, id)| id.clone()).collect();
+    let client = MusicBrainzClient::new("Impresario/0.1.0 (https://github.com/CrystalKeck27/impresario)");
+    let mut release_map: HashMap<String, musicbrainz_rs::entity::release::Release> = HashMap::new();
+    static MUSICBRAINZ_REQUEST_GATE: tokio::sync::Mutex<Option<std::time::Instant>> = tokio::sync::Mutex::const_new(None);
+    for recording_id in &distinct_ids {
+        let mut offset = 0u16;
+        loop {
+            let mut request_gate = MUSICBRAINZ_REQUEST_GATE.lock().await;
+            if let Some(previous) = *request_gate {
+                let remaining = std::time::Duration::from_millis(1100).saturating_sub(previous.elapsed());
+                if !remaining.is_zero() { tokio::time::sleep(remaining).await; }
+            }
+            let mut query = Release::browse();
+            query.by_recording(recording_id).with_medias().with_recordings();
+            query.limit(100).offset(offset);
+            let page = query.execute_with_client_async(&client).await
+                .map_err(|error| ServerFnError::ServerError(format!(
+                    "MusicBrainz lookup failed for recording {recording_id}: {}",
+                    describe_musicbrainz_error(&error),
+                )))?;
+            *request_gate = Some(std::time::Instant::now());
+            drop(request_gate);
+            let count = page.count.max(0) as u32;
+            let received = page.entities.len() as u32;
+            for release in page.entities { release_map.entry(release.id.clone()).or_insert(release); }
+            if received == 0 || offset as u32 + received >= count { break; }
+            let next_offset = offset as u32 + received;
+            if next_offset > u16::MAX as u32 {
+                return Err(ServerFnError::ServerError(format!("MusicBrainz returned more than the supported browse window for recording {recording_id}")));
+            }
+            offset = next_offset as u16;
+        }
+    }
+
+    let releases = release_map.into_values().map(|release| {
+        let tracks = release.media.unwrap_or_default().into_iter().flat_map(|media| media.tracks.unwrap_or_default())
+            .filter_map(|track| track.recording.map(|recording| GroupTrack {
+                track_id: track.id,
+                recording_id: recording.id,
+                title: track.title,
+                position: track.number,
+            })).collect::<Vec<_>>();
+        let complete_input = distinct_ids.iter().all(|id| tracks.iter().any(|track| &track.recording_id == id));
+        GroupRelease { release_id: release.id, title: release.title, date: release.date.map(|date| date.to_string()), track_count: tracks.len(), complete_input, tracks }
+    }).collect::<Vec<_>>();
+    let releases = rank_group_releases(releases);
+    let preferred_release_id = releases.iter().find(|release| release.complete_input).map(|release| release.release_id.clone());
+    let mut recording_counts = HashMap::<String, usize>::new();
+    for (_, id) in &inputs { *recording_counts.entry(id.clone()).or_default() += 1; }
+    let mut files = inputs.into_iter().map(|(relative_path, recording_id)| {
+        let candidates = group_releases_for_recording(&releases, &recording_id);
+        let automatic_release = preferred_release_id.as_ref().filter(|id| candidates.iter().any(|release| &release.release_id == *id))
+            .cloned().or_else(|| (candidates.len() == 1).then(|| candidates[0].release_id.clone()));
+        let chosen_release = automatic_release.as_ref().and_then(|id| candidates.iter().find(|release| &release.release_id == id));
+        let (selected_track_id, ambiguous) = chosen_release.map(|release| {
+            resolve_group_track(release, &recording_id, recording_counts.get(&recording_id).copied().unwrap_or(0))
+        }).unwrap_or((None, false));
+        let status = if candidates.is_empty() { GroupStatus::NoRelease }
+            else if ambiguous { GroupStatus::Ambiguous }
+            else if selected_track_id.is_some() { GroupStatus::Ready }
+            else { GroupStatus::Unresolved };
+        GroupFile { relative_path, recording_id, status, releases: candidates,
+            selected_release_id: automatic_release, selected_track_id, manual_choice: false, message: None }
+    }).collect::<Vec<_>>();
+    for file in files.iter_mut().filter(|file| file.status == GroupStatus::Ready) {
+        if let Some(track_id) = file.selected_track_id.as_deref() {
+            match write_track_id(&source_root, &destination_root, &file.relative_path, track_id, false) {
+                Ok(true) => {
+                    file.status = GroupStatus::Conflict;
+                    file.message = Some("A different track sidecar already exists; confirm replacement to continue.".to_string());
+                }
+                Ok(false) => file.status = GroupStatus::Matched,
+                Err(error) => {
+                    file.status = GroupStatus::Error;
+                    file.message = Some(error);
+                }
+            }
+        }
+    }
+    Ok(GroupScan { files, preferred_release_id })
+}
+
+#[cfg(feature = "ssr")]
+fn describe_musicbrainz_error(error: &musicbrainz_rs::ApiEndpointError) -> String {
+    match error {
+        musicbrainz_rs::ApiEndpointError::ApiRequestError { source, .. } => {
+            format!("HTTP request failed: {source} ({source:?})")
+        }
+        musicbrainz_rs::ApiEndpointError::InvalidUriError { source, .. } => {
+            format!("invalid MusicBrainz request URI: {source}")
+        }
+        musicbrainz_rs::ApiEndpointError::ParsingError { source, .. } => {
+            format!("could not parse MusicBrainz response: {source}")
+        }
+    }
+}
+
+#[cfg(feature = "ssr")]
+fn group_releases_for_recording(releases: &[GroupRelease], recording_id: &str) -> Vec<GroupRelease> {
+    releases.iter().filter_map(|release| {
+        let mut candidate = release.clone();
+        candidate.tracks.retain(|track| track.recording_id == recording_id);
+        (!candidate.tracks.is_empty()).then_some(candidate)
+    }).collect()
+}
+
+#[cfg(feature = "ssr")]
+fn rank_group_releases(mut releases: Vec<GroupRelease>) -> Vec<GroupRelease> {
+    releases.sort_by(|left, right| right.complete_input.cmp(&left.complete_input)
+        .then_with(|| right.track_count.cmp(&left.track_count))
+        .then_with(|| left.title.to_lowercase().cmp(&right.title.to_lowercase()))
+        .then_with(|| left.release_id.cmp(&right.release_id)));
+    releases
+}
+
+#[cfg(feature = "ssr")]
+fn resolve_group_track(release: &GroupRelease, recording_id: &str, input_file_count: usize) -> (Option<String>, bool) {
+    let matches = release.tracks.iter().filter(|track| track.recording_id == recording_id).collect::<Vec<_>>();
+    let ambiguous = matches.len() > 1 || (input_file_count > 1 && matches.len() == 1);
+    let track_id = (!ambiguous).then(|| matches.first().map(|track| track.track_id.clone())).flatten();
+    (track_id, ambiguous)
+}
+
+#[server]
+async fn save_track_id(
+    source: String,
+    destination: String,
+    relative_path: String,
+    track_id: String,
+    overwrite: bool,
+) -> Result<bool, ServerFnError<String>> {
+    validate_musicbrainz_id(&track_id).map_err(ServerFnError::ServerError)?;
+    let (source_root, destination_root) = prepare_identify_roots(&source, &destination)
+        .map_err(ServerFnError::ServerError)?;
+    write_track_id(&source_root, &destination_root, &relative_path, &track_id, overwrite)
+        .map_err(ServerFnError::ServerError)
+}
+
+#[cfg(feature = "ssr")]
+fn validate_musicbrainz_id(id: &str) -> Result<(), String> {
+    if id.len() != 36 || !id.bytes().enumerate().all(|(index, byte)| {
+        if [8, 13, 18, 23].contains(&index) { byte == b'-' } else { byte.is_ascii_hexdigit() }
+    }) {
+        return Err("Invalid MusicBrainz identifier; expected a UUID-formatted MBID".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "ssr")]
+fn collect_recording_sidecars(root: &std::path::Path, directory: &std::path::Path, files: &mut Vec<std::path::PathBuf>) -> Result<(), String> {
+    use std::fs;
+    for entry in fs::read_dir(directory).map_err(|error| format!("Could not read {}: {error}", directory.display()))? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+        if metadata.file_type().is_symlink() { continue; }
+        if metadata.is_dir() { collect_recording_sidecars(root, &path, files)?; }
+        else if metadata.is_file() && path.file_name().and_then(std::ffi::OsStr::to_str).map(|name| name.ends_with(".recording.mbid")).unwrap_or(false) {
+            let canonical = fs::canonicalize(&path).map_err(|error| error.to_string())?;
+            if canonical.starts_with(root) { files.push(canonical); }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "ssr")]
+fn write_track_id(source_root: &std::path::Path, destination_root: &std::path::Path, relative_path: &str, track_id: &str, overwrite: bool) -> Result<bool, String> {
+    use std::{fs, path::{Component, Path, PathBuf}};
+    validate_musicbrainz_id(track_id)?;
+    let relative = Path::new(relative_path);
+    if relative.as_os_str().is_empty() || relative.components().any(|component| !matches!(component, Component::Normal(_))) {
+        return Err("Invalid source-relative file path".to_string());
+    }
+    let audio = fs::canonicalize(source_root.join(format!("{relative_path}.recording.mbid")))
+        .map_err(|error| format!("Could not access recording sidecar: {error}"))?;
+    if !audio.starts_with(source_root) || !audio.is_file() { return Err("Recording sidecar is outside the selected directory".to_string()); }
+    let mut output_relative = PathBuf::new();
+    for component in relative.parent().into_iter().flat_map(Path::components) { output_relative.push(component.as_os_str()); }
+    let mut filename = relative.file_name().ok_or_else(|| "Invalid source filename".to_string())?.to_os_string();
+    filename.push(".track.mbid");
+    output_relative.push(filename);
+    let output = destination_root.join(output_relative);
+    let parent = output.parent().ok_or_else(|| "Invalid destination path".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| format!("Could not create output directory: {error}"))?;
+    if !fs::canonicalize(parent).map_err(|error| error.to_string())?.starts_with(destination_root) { return Err("Output path escapes the destination directory".to_string()); }
+    if let Ok(metadata) = fs::symlink_metadata(&output) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() { return Err("Output sidecar is not a regular file".to_string()); }
+        if fs::read_to_string(&output).map_err(|error| error.to_string())? == track_id { return Ok(false); }
+        if !overwrite { return Ok(true); }
+    }
+    fs::write(output, track_id).map_err(|error| format!("Could not write track ID: {error}"))?;
+    Ok(false)
+}
+
+#[server]
 async fn list_identify_files(source: String) -> Result<Vec<IdentifyFile>, ServerFnError<String>> {
     use std::{fs, path::Path};
 
@@ -1289,7 +1763,7 @@ fn best_acoustid_match(results: Vec<acoustid::LookupResult>) -> Option<AcoustidM
 
 #[cfg(all(test, feature = "ssr"))]
 mod acoustid_match_tests {
-    use super::{best_acoustid_match, prepare_identify_roots, recording_candidates, write_recording_id};
+    use super::{best_acoustid_match, group_releases_for_recording, prepare_identify_roots, rank_group_releases, recording_candidates, resolve_group_track, write_recording_id, write_track_id, GroupRelease, GroupTrack};
     use std::{fs, path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
 
     fn map_response(json: &str) -> Option<super::AcoustidMatch> {
@@ -1404,6 +1878,102 @@ mod acoustid_match_tests {
         )
         .is_err());
         assert!(!nested_destination.exists());
+
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn complete_releases_rank_by_size_then_title_and_id() {
+        let make = |release_id: &str, title: &str, track_count: usize, complete_input: bool| GroupRelease {
+            release_id: release_id.to_string(),
+            title: title.to_string(),
+            date: None,
+            track_count,
+            complete_input,
+            tracks: Vec::new(),
+        };
+        let ranked = rank_group_releases(vec![
+            make("partial", "A", 100, false),
+            make("small", "Z", 8, true),
+            make("larger-b", "B", 12, true),
+            make("larger-a", "A", 12, true),
+        ]);
+        assert_eq!(ranked.iter().map(|release| release.release_id.as_str()).collect::<Vec<_>>(),
+            vec!["larger-a", "larger-b", "small", "partial"]);
+    }
+
+    #[test]
+    fn group_release_results_only_include_tracks_for_the_recording() {
+        let release = GroupRelease {
+            release_id: "release-a".to_string(),
+            title: "Album".to_string(),
+            date: None,
+            track_count: 2,
+            complete_input: true,
+            tracks: vec![
+                GroupTrack {
+                    track_id: "track-a".to_string(),
+                    recording_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                    title: "Song A".to_string(),
+                    position: "1".to_string(),
+                },
+                GroupTrack {
+                    track_id: "track-b".to_string(),
+                    recording_id: "22222222-2222-4222-8222-222222222222".to_string(),
+                    title: "Song B".to_string(),
+                    position: "2".to_string(),
+                },
+            ],
+        };
+
+        let candidates = group_releases_for_recording(&[release], "11111111-1111-4111-8111-111111111111");
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].track_count, 2);
+        assert_eq!(candidates[0].tracks.iter().map(|track| track.track_id.as_str()).collect::<Vec<_>>(), vec!["track-a"]);
+    }
+
+    #[test]
+    fn repeated_recordings_and_track_occurrences_require_manual_assignment() {
+        let track = |track_id: &str| GroupTrack {
+            track_id: track_id.to_string(),
+            recording_id: "11111111-1111-4111-8111-111111111111".to_string(),
+            title: "Song".to_string(),
+            position: "1".to_string(),
+        };
+        let single = GroupRelease {
+            release_id: "release-a".to_string(), title: "Album".to_string(), date: None,
+            track_count: 1, complete_input: true, tracks: vec![track("track-a")],
+        };
+        let recording_id = "11111111-1111-4111-8111-111111111111";
+        assert_eq!(resolve_group_track(&single, recording_id, 1), (Some("track-a".to_string()), false));
+        assert_eq!(resolve_group_track(&single, recording_id, 2), (None, true));
+
+        let repeated = GroupRelease { track_count: 2, tracks: vec![track("track-a"), track("track-b")], ..single };
+        assert_eq!(resolve_group_track(&repeated, recording_id, 1), (None, true));
+    }
+
+    #[test]
+    fn track_sidecar_name_is_mirrored_and_conflicts_require_confirmation() {
+        let temp = test_directory();
+        let source = temp.join("identified");
+        let destination = temp.join("grouped");
+        fs::create_dir_all(source.join("album")).unwrap();
+        fs::create_dir_all(&destination).unwrap();
+        fs::write(source.join("album/song.flac.recording.mbid"), "11111111-1111-4111-8111-111111111111").unwrap();
+        let source = fs::canonicalize(source).unwrap();
+        let destination = fs::canonicalize(destination).unwrap();
+        let track_a = "22222222-2222-4222-8222-222222222222";
+        let track_b = "33333333-3333-4333-8333-333333333333";
+
+        assert!(!write_track_id(&source, &destination, "album/song.flac", track_a, false).unwrap());
+        let sidecar = destination.join("album/song.flac.track.mbid");
+        assert_eq!(fs::read_to_string(&sidecar).unwrap(), track_a);
+        assert!(!write_track_id(&source, &destination, "album/song.flac", track_a, false).unwrap());
+        assert!(write_track_id(&source, &destination, "album/song.flac", track_b, false).unwrap());
+        assert_eq!(fs::read_to_string(&sidecar).unwrap(), track_a);
+        assert!(!write_track_id(&source, &destination, "album/song.flac", track_b, true).unwrap());
+        assert_eq!(fs::read_to_string(&sidecar).unwrap(), track_b);
 
         fs::remove_dir_all(temp).unwrap();
     }
