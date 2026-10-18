@@ -59,6 +59,14 @@ docker compose ps
 psql "$(grep '^DATABASE_URL=' .env | cut -d= -f2-)" -c 'select 1;'
 ```
 
+The PostgreSQL schema is available both as `scripts/create-tables.sql` and as a Diesel migration. To create the tables through Diesel, install the Diesel CLI with PostgreSQL support and run:
+
+```sh
+DATABASE_URL="$(grep '^DATABASE_URL=' .env | cut -d= -f2-)" diesel migration run
+```
+
+The checked-in Diesel table definitions are in `src/schema.rs`. The application does not automatically connect to PostgreSQL or run migrations.
+
 Use `podman compose` instead of `docker compose` for the equivalent Podman commands. Podman's `compose` command delegates to an external provider; this dev shell includes `podman-compose`. If provider selection is ambiguous, set `PODMAN_COMPOSE_PROVIDER=podman-compose` for the command.
 
 Stop the service while preserving its database with `docker compose down` or `podman compose down`. The named volume keeps data across container restarts and recreation. To permanently delete the local database and all its data, run `docker compose down -v` or `podman compose down -v`.
