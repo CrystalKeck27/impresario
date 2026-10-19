@@ -131,6 +131,16 @@ main {
 	cursor: wait;
 }
 
+.fingerprint-form__actions {
+	display: flex;
+	justify-content: flex-end;
+	margin-top: 1rem;
+}
+
+.fingerprint-preparation .fingerprint-progress__bar {
+	accent-color: #0f4c81;
+}
+
 .fingerprint-progress {
 	margin-top: 1.25rem;
 	padding: 1rem;
