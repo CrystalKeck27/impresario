@@ -1,0 +1,1 @@
+DROP TABLE acoustid_matches;
