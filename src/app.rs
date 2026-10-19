@@ -6,6 +6,18 @@ use leptos_router::{
 };
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "ssr")]
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
+    time::Instant,
+};
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileEntry {
     pub name: String,
@@ -31,6 +43,72 @@ pub struct AcoustidMatch {
     acoustid_id: Option<String>,
     recording_id: Option<String>,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FingerprintJobStatus {
+    pub job_id: String,
+    pub total: usize,
+    pub completed: usize,
+    pub stored: usize,
+    pub skipped_existing: usize,
+    pub failed: usize,
+    pub errors: Vec<String>,
+    pub is_complete: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FingerprintPreparationStatus {
+    pub job_id: String,
+    pub directories_scanned: usize,
+    pub files_scanned: usize,
+    pub candidate_count: usize,
+    pub skipped_existing: usize,
+    pub invalid_count: usize,
+    pub is_complete: bool,
+    pub is_cancelled: bool,
+    pub error: Option<String>,
+}
+
+#[cfg(feature = "ssr")]
+struct FingerprintJobEntry {
+    status: FingerprintJobStatus,
+    updated_at: Instant,
+}
+
+#[cfg(feature = "ssr")]
+static FINGERPRINT_JOBS: OnceLock<Mutex<HashMap<String, FingerprintJobEntry>>> = OnceLock::new();
+
+#[cfg(feature = "ssr")]
+fn fingerprint_jobs() -> &'static Mutex<HashMap<String, FingerprintJobEntry>> {
+    FINGERPRINT_JOBS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(feature = "ssr")]
+struct FingerprintPreparationEntry {
+    status: FingerprintPreparationStatus,
+    candidate_paths: Vec<String>,
+    invalid_paths: Vec<String>,
+    consumed: bool,
+    cancellation_requested: Arc<AtomicBool>,
+    updated_at: Instant,
+}
+
+#[cfg(feature = "ssr")]
+static FINGERPRINT_PREPARATION_JOBS: OnceLock<Mutex<HashMap<String, FingerprintPreparationEntry>>> =
+    OnceLock::new();
+
+#[cfg(feature = "ssr")]
+fn fingerprint_preparation_jobs() -> &'static Mutex<HashMap<String, FingerprintPreparationEntry>> {
+    FINGERPRINT_PREPARATION_JOBS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(feature = "hydrate")]
+async fn fingerprint_poll_delay() {
+    gloo_timers::future::TimeoutFuture::new(500).await;
+}
+
+#[cfg(all(not(feature = "hydrate"), feature = "ssr"))]
+async fn fingerprint_poll_delay() {}
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
     view! {
@@ -69,6 +147,7 @@ pub fn App() -> impl IntoView {
                 <Routes fallback=|| "Page not found.".into_view()>
                     <Route path=StaticSegment("") view=HomePage/>
                     <Route path=StaticSegment("files") view=FilesPage/>
+                    <Route path=StaticSegment("fingerprint") view=FingerprintPage/>
                 </Routes>
             </main>
         </Router>
@@ -86,6 +165,263 @@ fn HomePage() -> impl IntoView {
         <h1>"Welcome to Leptos!"</h1>
         <button on:click=on_click>"Click Me: " {count}</button>
         <a href="/files"><button>"Files"</button></a>
+        <a class="home-page__link" href="/fingerprint">"Fingerprint a directory"</a>
+    }
+}
+
+#[component]
+fn FingerprintPage() -> impl IntoView {
+    use leptos::task::spawn_local;
+
+    let draft_path = RwSignal::new(".".to_string());
+    let preparation_status = RwSignal::new(None::<FingerprintPreparationStatus>);
+    let preparing = RwSignal::new(false);
+    let stopping = RwSignal::new(false);
+    let job_status = RwSignal::new(None::<FingerprintJobStatus>);
+    let running = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+
+    let load_directory = move |event: leptos::ev::SubmitEvent| {
+        event.prevent_default();
+        if preparing.get_untracked() || running.get_untracked() {
+            return;
+        }
+
+        let directory = draft_path.get_untracked();
+        preparation_status.set(None);
+        job_status.set(None);
+        error.set(None);
+        stopping.set(false);
+        preparing.set(true);
+
+        spawn_local(async move {
+            match start_fingerprint_preparation(directory).await {
+                Ok(mut status) => {
+                    preparation_status.set(Some(status.clone()));
+                    while !status.is_complete {
+                        fingerprint_poll_delay().await;
+                        match get_fingerprint_preparation_status(status.job_id.clone()).await {
+                            Ok(updated) => {
+                                status = updated;
+                                preparation_status.set(Some(status.clone()));
+                            }
+                            Err(fetch_error) => {
+                                error.set(Some(fetch_error.to_string()));
+                                preparing.set(false);
+                                stopping.set(false);
+                                return;
+                            }
+                        }
+                    }
+                    if let Some(message) = status.error {
+                        error.set(Some(message));
+                    }
+                }
+                Err(start_error) => error.set(Some(start_error.to_string())),
+            }
+            preparing.set(false);
+            stopping.set(false);
+        });
+    };
+
+    let stop_loading = move |_| {
+        if !preparing.get_untracked() || stopping.get_untracked() {
+            return;
+        }
+        let Some(status) = preparation_status.get_untracked() else {
+            return;
+        };
+        stopping.set(true);
+        spawn_local(async move {
+            if let Err(stop_error) = cancel_fingerprint_preparation(status.job_id).await {
+                error.set(Some(stop_error.to_string()));
+                stopping.set(false);
+            }
+        });
+    };
+
+    let start_fingerprinting = move |_| {
+        if preparing.get_untracked() || running.get_untracked() {
+            return;
+        }
+        let Some(preparation) = preparation_status.get_untracked() else {
+            return;
+        };
+        if !preparation.is_complete || preparation.error.is_some() {
+            return;
+        }
+
+        job_status.set(None);
+        error.set(None);
+        running.set(true);
+
+        spawn_local(async move {
+            match start_fingerprint_job(preparation.job_id).await {
+                Ok(mut status) => {
+                    job_status.set(Some(status.clone()));
+                    while !status.is_complete {
+                        fingerprint_poll_delay().await;
+                        match get_fingerprint_job_status(status.job_id.clone()).await {
+                            Ok(updated) => {
+                                status = updated;
+                                job_status.set(Some(status.clone()));
+                            }
+                            Err(fetch_error) => {
+                                error.set(Some(fetch_error.to_string()));
+                                running.set(false);
+                                return;
+                            }
+                        }
+                    }
+                }
+                Err(start_error) => error.set(Some(start_error.to_string())),
+            }
+            running.set(false);
+        });
+    };
+
+    view! {
+        <section class="fingerprint-page">
+            <header class="fingerprint-page__header">
+                <h1>"Fingerprint a directory"</h1>
+                <p>"Load a directory to find new audio files, then fingerprint them with fpcalc and save results to PostgreSQL."</p>
+            </header>
+            <form class="fingerprint-form" on:submit=load_directory>
+                <label class="fingerprint-form__label" for="fingerprint-directory">
+                    "Directory path"
+                </label>
+                <div class="fingerprint-form__controls">
+                    <input
+                        id="fingerprint-directory"
+                        class="fingerprint-form__input"
+                        type="text"
+                        prop:value=move || draft_path.get()
+                        placeholder="Enter a directory path"
+                        disabled=move || preparing.get() || running.get()
+                        on:input=move |event| {
+                            draft_path.set(event_target_value(&event));
+                            preparation_status.set(None);
+                            job_status.set(None);
+                            error.set(None);
+                        }
+                    />
+                    <button class="fingerprint-form__button" type="submit" disabled=move || preparing.get() || running.get()>
+                        {move || if preparing.get() { "Loading files…" } else { "Load directory" }}
+                    </button>
+                </div>
+            </form>
+            {move || preparation_status.get().map(|status| {
+                let ready = status.is_complete && !status.is_cancelled && status.error.is_none();
+                view! {
+                    <section class="fingerprint-progress fingerprint-preparation" aria-live="polite">
+                        <div class="fingerprint-progress__heading">
+                            <h2>{if !status.is_complete {
+                                "Loading directory"
+                            } else if status.is_cancelled {
+                                "Directory loading stopped"
+                            } else if ready {
+                                "Directory loaded"
+                            } else {
+                                "Directory loading failed"
+                            }}</h2>
+                            {if !status.is_complete {
+                                view! { <span>"Scanning…"</span> }.into_any()
+                            } else {
+                                ().into_any()
+                            }}
+                        </div>
+                        {if !status.is_complete {
+                            view! {
+                                <div class="fingerprint-preparation__activity">
+                                    <progress class="fingerprint-progress__bar" aria-label="Directory loading progress"></progress>
+                                    <button
+                                        class="fingerprint-form__button fingerprint-form__button--stop"
+                                        type="button"
+                                        disabled=move || stopping.get()
+                                        on:click=stop_loading
+                                    >
+                                        {move || if stopping.get() { "Stopping…" } else { "Stop loading" }}
+                                    </button>
+                                </div>
+                            }.into_any()
+                        } else {
+                            ().into_any()
+                        }}
+                        <p class="fingerprint-progress__summary">
+                            {format!("{} directories and {} files scanned", status.directories_scanned, status.files_scanned)}
+                        </p>
+                        {if status.is_cancelled {
+                            view! { <p class="fingerprint-progress__summary">"Loading was stopped. Load the directory again to restart."</p> }.into_any()
+                        } else {
+                            ().into_any()
+                        }}
+                        {if ready {
+                            view! {
+                                <p class="fingerprint-progress__summary">
+                                    {format!("{} new audio file(s) ready · {} already fingerprinted · {} invalid path(s)", status.candidate_count, status.skipped_existing, status.invalid_count)}
+                                </p>
+                            }.into_any()
+                        } else {
+                            ().into_any()
+                        }}
+                    </section>
+                }
+            })}
+            {move || (preparation_status.get().is_some_and(|status| status.is_complete && !status.is_cancelled && status.error.is_none())
+                && job_status.get().is_none()).then(|| view! {
+                <div class="fingerprint-form__actions">
+                    <button
+                        class="fingerprint-form__button"
+                        type="button"
+                        disabled=move || preparing.get() || running.get()
+                        on:click=start_fingerprinting
+                    >
+                        {move || if running.get() { "Fingerprinting…" } else { "Start fingerprinting" }}
+                    </button>
+                </div>
+            })}
+            {move || error.get().map(|message| view! {
+                <p class="fingerprint-page__error" role="alert">{message}</p>
+            })}
+            {move || match job_status.get() {
+                None => ().into_any(),
+                Some(status) => {
+                    let progress_max = status.total.max(1);
+                    let percentage = status
+                        .completed
+                        .saturating_mul(100)
+                        .checked_div(status.total)
+                        .unwrap_or(100);
+                    view! {
+                        <section class="fingerprint-progress" aria-live="polite">
+                            <div class="fingerprint-progress__heading">
+                                <h2>{if status.is_complete { "Fingerprinting complete" } else { "Fingerprinting in progress" }}</h2>
+                                <span>{format!("{percentage}%")}</span>
+                            </div>
+                            <progress
+                                class="fingerprint-progress__bar"
+                                max=progress_max
+                                value=status.completed
+                                aria-label="Fingerprinting progress"
+                            ></progress>
+                            <p class="fingerprint-progress__summary">
+                                {format!("{} of {} processed · {} saved · {} failed · {} already fingerprinted", status.completed, status.total, status.stored, status.failed, status.skipped_existing)}
+                            </p>
+                            {if status.errors.is_empty() {
+                                ().into_any()
+                            } else {
+                                view! {
+                                    <details class="fingerprint-progress__errors">
+                                        <summary>{format!("{} file(s) failed; showing {} error details", status.failed, status.errors.len())}</summary>
+                                        <ul>{status.errors.into_iter().map(|item| view! { <li>{item}</li> }).collect::<Vec<_>>()}</ul>
+                                    </details>
+                                }.into_any()
+                            }}
+                        </section>
+                    }.into_any()
+                }
+            }}
+        </section>
     }
 }
 
@@ -566,6 +902,428 @@ pub async fn fetch_files_in_directory(
 }
 
 #[server]
+pub async fn start_fingerprint_preparation(
+    directory: String,
+) -> Result<FingerprintPreparationStatus, ServerFnError<String>> {
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let status = FingerprintPreparationStatus {
+        job_id: job_id.clone(),
+        directories_scanned: 0,
+        files_scanned: 0,
+        candidate_count: 0,
+        skipped_existing: 0,
+        invalid_count: 0,
+        is_complete: false,
+        is_cancelled: false,
+        error: None,
+    };
+    let cancellation_requested = Arc::new(AtomicBool::new(false));
+    {
+        let mut jobs = fingerprint_preparation_jobs()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        jobs.retain(|_, entry| {
+            !entry.status.is_complete || entry.updated_at.elapsed().as_secs() < 3600
+        });
+        jobs.insert(
+            job_id.clone(),
+            FingerprintPreparationEntry {
+                status: status.clone(),
+                candidate_paths: Vec::new(),
+                invalid_paths: Vec::new(),
+                consumed: false,
+                cancellation_requested: Arc::clone(&cancellation_requested),
+                updated_at: Instant::now(),
+            },
+        );
+    }
+
+    tokio::spawn(prepare_fingerprint_job(
+        job_id,
+        directory,
+        cancellation_requested,
+    ));
+    Ok(status)
+}
+
+#[server]
+pub async fn cancel_fingerprint_preparation(job_id: String) -> Result<(), ServerFnError<String>> {
+    let jobs = fingerprint_preparation_jobs()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let entry = jobs.get(&job_id).ok_or_else(|| {
+        ServerFnError::ServerError("Directory preparation job was not found".to_string())
+    })?;
+    if !entry.status.is_complete {
+        entry.cancellation_requested.store(true, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+#[server]
+pub async fn get_fingerprint_preparation_status(
+    job_id: String,
+) -> Result<FingerprintPreparationStatus, ServerFnError<String>> {
+    let jobs = fingerprint_preparation_jobs()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    jobs.get(&job_id)
+        .map(|entry| entry.status.clone())
+        .ok_or_else(|| {
+            ServerFnError::ServerError("Directory preparation job was not found".to_string())
+        })
+}
+
+#[cfg(feature = "ssr")]
+async fn prepare_fingerprint_job(
+    job_id: String,
+    directory: String,
+    cancellation_requested: Arc<AtomicBool>,
+) {
+    let progress_job_id = job_id.clone();
+    let worker_cancellation = Arc::clone(&cancellation_requested);
+    let result = tokio::task::spawn_blocking(move || {
+        let root = fs::canonicalize(&directory)
+            .map_err(|error| format!("Could not access directory: {error}"))?;
+        if !root.is_dir() {
+            return Err("Fingerprint input must be a directory".to_string());
+        }
+
+        let mut discovered = Vec::new();
+        let mut on_entry = |entry_type| {
+            if worker_cancellation.load(Ordering::Relaxed) {
+                return true;
+            }
+            let mut jobs = fingerprint_preparation_jobs()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(entry) = jobs.get_mut(&progress_job_id) {
+                match entry_type {
+                    Some(true) => entry.status.directories_scanned += 1,
+                    Some(false) => entry.status.files_scanned += 1,
+                    None => {}
+                }
+                entry.updated_at = Instant::now();
+            }
+            false
+        };
+        collect_regular_files_with_progress(&root, &mut discovered, &mut on_entry)
+            .map_err(|error| format!("Could not scan directory: {error}"))?;
+
+        if worker_cancellation.load(Ordering::Relaxed) {
+            return Err("Directory preparation was stopped".to_string());
+        }
+
+        let stored_paths: HashSet<String> = crate::database::existing_fingerprint_paths()
+            .map_err(|error| format!("Could not check stored fingerprints: {error}"))?
+            .into_iter()
+            .collect();
+        if worker_cancellation.load(Ordering::Relaxed) {
+            return Err("Directory preparation was stopped".to_string());
+        }
+        Ok::<_, String>(partition_existing_paths(discovered, &stored_paths))
+    })
+    .await
+    .map_err(|error| format!("Could not prepare scan: {error}"))
+    .and_then(|result| result);
+
+    let mut jobs = fingerprint_preparation_jobs()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(entry) = jobs.get_mut(&job_id) {
+        let cancelled = cancellation_requested.load(Ordering::Relaxed);
+        if cancelled {
+            entry.status.is_cancelled = true;
+            entry.candidate_paths.clear();
+            entry.invalid_paths.clear();
+        } else {
+            match result {
+                Ok((candidate_paths, skipped_existing, invalid_paths)) => {
+                    entry.status.candidate_count = candidate_paths.len();
+                    entry.status.skipped_existing = skipped_existing;
+                    entry.status.invalid_count = invalid_paths.len();
+                    entry.candidate_paths = candidate_paths;
+                    entry.invalid_paths = invalid_paths;
+                }
+                Err(error) => entry.status.error = Some(error),
+            }
+        }
+        entry.status.is_complete = true;
+        entry.updated_at = Instant::now();
+    }
+}
+
+#[server]
+pub async fn start_fingerprint_job(
+    preparation_job_id: String,
+) -> Result<FingerprintJobStatus, ServerFnError<String>> {
+    let (paths, skipped_existing, invalid_paths) = {
+        let mut jobs = fingerprint_preparation_jobs()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = jobs.get_mut(&preparation_job_id).ok_or_else(|| {
+            ServerFnError::ServerError("Directory preparation job was not found".to_string())
+        })?;
+        if !entry.status.is_complete {
+            return Err(ServerFnError::ServerError(
+                "Directory preparation is still in progress".to_string(),
+            ));
+        }
+        if let Some(error) = &entry.status.error {
+            return Err(ServerFnError::ServerError(error.clone()));
+        }
+        if entry.consumed {
+            return Err(ServerFnError::ServerError(
+                "Directory preparation job has already been used".to_string(),
+            ));
+        }
+        entry.consumed = true;
+        (
+            std::mem::take(&mut entry.candidate_paths),
+            entry.status.skipped_existing,
+            std::mem::take(&mut entry.invalid_paths),
+        )
+    };
+
+    let invalid_count = invalid_paths.len();
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let status = FingerprintJobStatus {
+        job_id: job_id.clone(),
+        total: paths.len() + invalid_count,
+        completed: invalid_count,
+        stored: 0,
+        skipped_existing,
+        failed: invalid_count,
+        errors: invalid_paths.into_iter().take(10).collect(),
+        is_complete: paths.is_empty(),
+    };
+
+    {
+        let mut jobs = fingerprint_jobs()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        jobs.retain(|_, entry| {
+            !entry.status.is_complete || entry.updated_at.elapsed().as_secs() < 3600
+        });
+        jobs.insert(
+            job_id.clone(),
+            FingerprintJobEntry {
+                status: status.clone(),
+                updated_at: Instant::now(),
+            },
+        );
+    }
+
+    if !paths.is_empty() {
+        tokio::spawn(run_fingerprint_job(job_id, paths));
+    }
+
+    Ok(status)
+}
+
+#[server]
+pub async fn get_fingerprint_job_status(
+    job_id: String,
+) -> Result<FingerprintJobStatus, ServerFnError<String>> {
+    let jobs = fingerprint_jobs()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    jobs.get(&job_id)
+        .map(|entry| entry.status.clone())
+        .ok_or_else(|| ServerFnError::ServerError("Fingerprint job was not found".to_string()))
+}
+
+#[cfg(feature = "ssr")]
+fn collect_regular_files_with_progress(
+    directory: &Path,
+    files: &mut Vec<PathBuf>,
+    on_entry: &mut dyn FnMut(Option<bool>) -> bool,
+) -> std::io::Result<()> {
+    if on_entry(Some(true)) {
+        return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+    }
+    for entry in fs::read_dir(directory)? {
+        if on_entry(None) {
+            return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+        }
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let path = entry.path();
+        if file_type.is_dir() {
+            collect_regular_files_with_progress(&path, files, on_entry)?;
+        } else if file_type.is_file() {
+            if on_entry(Some(false)) {
+                return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+            }
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "ssr")]
+fn partition_existing_paths(
+    discovered: Vec<PathBuf>,
+    stored_paths: &HashSet<String>,
+) -> (Vec<String>, usize, Vec<String>) {
+    let mut paths = Vec::new();
+    let mut skipped_existing = 0;
+    let mut invalid_paths = Vec::new();
+    for path in discovered {
+        if !is_audio_file(&path) {
+            continue;
+        }
+        match path.to_str() {
+            Some(path) if stored_paths.contains(path) => skipped_existing += 1,
+            Some(path) => paths.push(path.to_string()),
+            None => invalid_paths.push(format!(
+                "A file path is not valid UTF-8: {}",
+                path.display()
+            )),
+        }
+    }
+    paths.sort();
+    (paths, skipped_existing, invalid_paths)
+}
+
+#[cfg(feature = "ssr")]
+fn is_audio_file(path: &Path) -> bool {
+    const AUDIO_EXTENSIONS: &[&str] = &[
+        "aac", "aif", "aiff", "alac", "ape", "au", "caf", "dff", "dsf", "flac", "m4a", "m4b",
+        "m4p", "mid", "midi", "mka", "mp3", "mpc", "oga", "ogg", "opus", "ra", "ram", "snd", "tta",
+        "voc", "wav", "wave", "wma", "wv",
+    ];
+
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            AUDIO_EXTENSIONS
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        })
+}
+
+#[cfg(feature = "ssr")]
+async fn run_fingerprint_job(job_id: String, paths: Vec<String>) {
+    use tokio::task::JoinSet;
+
+    let concurrency = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(2)
+        .clamp(1, 8);
+    let mut pending = paths.into_iter();
+    let mut tasks = JoinSet::new();
+
+    for _ in 0..concurrency {
+        if let Some(path) = pending.next() {
+            tasks.spawn(async move {
+                let outcome = process_fingerprint_file(path.clone()).await;
+                (path, outcome)
+            });
+        }
+    }
+
+    while let Some(result) = tasks.join_next().await {
+        let outcome = match result {
+            Ok((path, outcome)) => match outcome {
+                Ok(stored) => Ok((path, stored)),
+                Err(error) => Err(format!("{path}: {error}")),
+            },
+            Err(error) => Err(format!("Fingerprint worker failed: {error}")),
+        };
+
+        let mut jobs = fingerprint_jobs()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = jobs.get_mut(&job_id) {
+            entry.status.completed += 1;
+            match outcome {
+                Ok((_, true)) => entry.status.stored += 1,
+                Ok((_, false)) => entry.status.skipped_existing += 1,
+                Err(message) => {
+                    entry.status.failed += 1;
+                    if entry.status.errors.len() < 10 {
+                        entry.status.errors.push(message);
+                    }
+                }
+            }
+            entry.updated_at = Instant::now();
+        }
+        drop(jobs);
+
+        if let Some(path) = pending.next() {
+            tasks.spawn(async move {
+                let outcome = process_fingerprint_file(path.clone()).await;
+                (path, outcome)
+            });
+        }
+    }
+
+    let mut jobs = fingerprint_jobs()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(entry) = jobs.get_mut(&job_id) {
+        entry.status.is_complete = true;
+        entry.updated_at = Instant::now();
+    }
+}
+
+#[cfg(feature = "ssr")]
+async fn process_fingerprint_file(path: String) -> Result<bool, String> {
+    let (fingerprint, duration) = calculate_fingerprint(Path::new(&path)).await?;
+    if duration.round() > i32::MAX as f64 {
+        return Err(format!("Duration is too long to store: {path}"));
+    }
+    let duration_seconds = duration.round() as i32;
+    tokio::task::spawn_blocking(move || {
+        crate::database::store_fingerprint(path, fingerprint.into_bytes(), duration_seconds)
+    })
+    .await
+    .map_err(|error| format!("Database worker failed: {error}"))?
+}
+
+#[cfg(feature = "ssr")]
+async fn calculate_fingerprint(path: &Path) -> Result<(String, f64), String> {
+    use std::process::Stdio;
+    use tokio::process::Command;
+
+    let output = Command::new("fpcalc")
+        .arg("-json")
+        .arg(path)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|error| format!("Could not run fpcalc: {error}"))?;
+
+    if !output.status.success() {
+        let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if message.is_empty() {
+            format!("fpcalc exited with status {}", output.status)
+        } else {
+            format!("fpcalc failed: {message}")
+        });
+    }
+
+    parse_fpcalc_output(&output.stdout)
+}
+
+#[cfg(feature = "ssr")]
+fn parse_fpcalc_output(output: &[u8]) -> Result<(String, f64), String> {
+    #[derive(Deserialize)]
+    struct FpcalcOutput {
+        duration: f64,
+        fingerprint: String,
+    }
+
+    let parsed: FpcalcOutput = serde_json::from_slice(output)
+        .map_err(|error| format!("Could not parse fpcalc output: {error}"))?;
+    if !parsed.duration.is_finite() || parsed.duration <= 0.0 || parsed.duration > u32::MAX as f64 {
+        return Err("fpcalc returned an invalid duration".to_string());
+    }
+    Ok((parsed.fingerprint, parsed.duration))
+}
+
+#[server]
 pub async fn fetch_file_content(
     path: String,
 ) -> Result<Vec<(String, String)>, ServerFnError<String>> {
@@ -605,14 +1363,7 @@ pub async fn fetch_file_content(
 #[server]
 pub async fn fetch_acoustid_match(path: String) -> Result<AcoustidLookup, ServerFnError<String>> {
     use acoustid::{AcoustIDClient, Metadata};
-    use std::{fs, process::Stdio};
-    use tokio::process::Command;
-
-    #[derive(Deserialize)]
-    struct FpcalcOutput {
-        duration: f64,
-        fingerprint: String,
-    }
+    use std::fs;
 
     let path = fs::canonicalize(&path)
         .map_err(|e| ServerFnError::ServerError(format!("Could not access file: {e}")))?;
@@ -624,32 +1375,9 @@ pub async fn fetch_acoustid_match(path: String) -> Result<AcoustidLookup, Server
         ));
     }
 
-    let output = Command::new("fpcalc")
-        .arg("-json")
-        .arg(path)
-        .stdin(Stdio::null())
-        .output()
+    let (fingerprint, duration) = calculate_fingerprint(&path)
         .await
-        .map_err(|e| ServerFnError::ServerError(format!("Could not run fpcalc: {e}")))?;
-
-    if !output.status.success() {
-        let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(ServerFnError::ServerError(if message.is_empty() {
-            format!("fpcalc exited with status {}", output.status)
-        } else {
-            format!("fpcalc failed: {message}")
-        }));
-    }
-
-    let fpcalc: FpcalcOutput = serde_json::from_slice(&output.stdout)
-        .map_err(|e| ServerFnError::ServerError(format!("Could not parse fpcalc output: {e}")))?;
-    if !fpcalc.duration.is_finite() || fpcalc.duration <= 0.0 || fpcalc.duration > u32::MAX as f64 {
-        return Err(ServerFnError::ServerError(
-            "fpcalc returned an invalid duration".to_string(),
-        ));
-    }
-
-    let fingerprint = fpcalc.fingerprint;
+        .map_err(ServerFnError::ServerError)?;
     let application_key = std::env::var("ACOUSTID_APPLICATION_KEY")
         .ok()
         .filter(|key| !key.trim().is_empty());
@@ -665,7 +1393,7 @@ pub async fn fetch_acoustid_match(path: String) -> Result<AcoustidLookup, Server
             ),
             Ok(client) => match client
                 .lookup_by_fingerprint(
-                    fpcalc.duration.round() as u32,
+                    duration.round() as u32,
                     &fingerprint,
                     &[Metadata::RecordingIds],
                 )
@@ -743,5 +1471,86 @@ mod acoustid_match_tests {
         .unwrap();
         assert_eq!(result.acoustid_id.as_deref(), Some("track"));
         assert_eq!(result.recording_id, None);
+    }
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod fingerprint_tests {
+    use super::{
+        collect_regular_files_with_progress, is_audio_file, parse_fpcalc_output,
+        partition_existing_paths,
+    };
+    use std::{collections::HashSet, fs, path::Path, time::SystemTime};
+
+    #[test]
+    fn parses_fpcalc_output_and_rejects_invalid_durations() {
+        let (fingerprint, duration) =
+            parse_fpcalc_output(br#"{"duration":12.6,"fingerprint":"abc123"}"#).unwrap();
+        assert_eq!(fingerprint, "abc123");
+        assert_eq!(duration, 12.6);
+
+        assert!(parse_fpcalc_output(br#"{"duration":0,"fingerprint":"x"}"#).is_err());
+        assert!(parse_fpcalc_output(b"not json").is_err());
+    }
+
+    #[test]
+    fn recursively_discovers_files_and_skips_paths_with_fingerprints() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("impresario-fingerprint-{unique}"));
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        let existing = root.join("already-stored.mp3");
+        let new_file = nested.join("new-file.flac");
+        let non_audio = nested.join("cover.jpg");
+        fs::write(&existing, b"audio placeholder").unwrap();
+        fs::write(&new_file, b"audio placeholder").unwrap();
+        fs::write(&non_audio, b"image placeholder").unwrap();
+
+        let mut discovered = Vec::new();
+        let (mut directories_scanned, mut files_scanned) = (0, 0);
+        collect_regular_files_with_progress(&root, &mut discovered, &mut |entry_type| {
+            match entry_type {
+                Some(true) => directories_scanned += 1,
+                Some(false) => files_scanned += 1,
+                None => {}
+            }
+            false
+        })
+        .unwrap();
+        let stored = HashSet::from([existing.to_str().unwrap().to_string()]);
+        let (candidates, skipped, invalid) = partition_existing_paths(discovered, &stored);
+
+        assert_eq!(directories_scanned, 2);
+        assert_eq!(files_scanned, 3);
+        assert_eq!(skipped, 1);
+        assert_eq!(invalid.len(), 0);
+        assert_eq!(candidates, vec![new_file.to_str().unwrap().to_string()]);
+        assert!(!is_audio_file(&non_audio));
+        assert!(is_audio_file(Path::new("track.MP3")));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn directory_discovery_stops_when_cancellation_is_requested() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("impresario-cancel-{unique}"));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("track.mp3"), b"audio placeholder").unwrap();
+
+        let mut discovered = Vec::new();
+        let result = collect_regular_files_with_progress(&root, &mut discovered, &mut |entry| {
+            matches!(entry, Some(false))
+        });
+
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Interrupted);
+        assert!(discovered.is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 }

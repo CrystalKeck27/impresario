@@ -3,6 +3,7 @@ import { test, expect } from "@playwright/test";
 const baseRoutes = [
   { path: "/", heading: "Welcome to Leptos!" },
   { path: "/files", heading: "Files Page" },
+  { path: "/fingerprint", heading: "Fingerprint a directory" },
 ];
 
 for (const route of baseRoutes) {
@@ -20,9 +21,23 @@ for (const route of baseRoutes) {
     if (route.path === "/") {
       await expect(page).toHaveTitle("Welcome to Leptos");
     }
+    if (route.path === "/fingerprint") {
+      await expect(page.getByLabel("Directory path")).toBeVisible();
+      await expect(page.getByRole("button", { name: "Load directory" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Start fingerprinting" })).toHaveCount(0);
+    }
     expect(errors, `Browser errors on ${route.path}`).toEqual([]);
   });
 }
+
+test("fingerprinting stays unavailable when directory preparation fails", async ({ page }) => {
+  await page.goto("http://localhost:3000/fingerprint");
+  await page.getByLabel("Directory path").fill("/directory/that/does/not/exist");
+  await page.getByRole("button", { name: "Load directory" }).click();
+
+  await expect(page.getByRole("alert")).toContainText("Could not access directory");
+  await expect(page.getByRole("button", { name: "Start fingerprinting" })).toHaveCount(0);
+});
 
 test("files page hydrates without a marker mismatch", async ({ page }) => {
   const hydrationErrors: string[] = [];
