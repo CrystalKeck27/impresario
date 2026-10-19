@@ -137,6 +137,24 @@ main {
 	margin-top: 1rem;
 }
 
+.fingerprint-preparation__activity {
+	display: flex;
+	align-items: center;
+	gap: 1rem;
+}
+
+.fingerprint-preparation__activity .fingerprint-progress__bar {
+	flex: 1;
+}
+
+.fingerprint-form__button--stop {
+	background: #8a2c2c;
+}
+
+.fingerprint-form__button--stop:disabled {
+	background: #9b6b6b;
+}
+
 .fingerprint-preparation .fingerprint-progress__bar {
 	accent-color: #0f4c81;
 }

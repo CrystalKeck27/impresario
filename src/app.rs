@@ -11,7 +11,10 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     time::Instant,
 };
 
@@ -62,6 +65,7 @@ pub struct FingerprintPreparationStatus {
     pub skipped_existing: usize,
     pub invalid_count: usize,
     pub is_complete: bool,
+    pub is_cancelled: bool,
     pub error: Option<String>,
 }
 
@@ -85,6 +89,7 @@ struct FingerprintPreparationEntry {
     candidate_paths: Vec<String>,
     invalid_paths: Vec<String>,
     consumed: bool,
+    cancellation_requested: Arc<AtomicBool>,
     updated_at: Instant,
 }
 
@@ -171,6 +176,7 @@ fn FingerprintPage() -> impl IntoView {
     let draft_path = RwSignal::new(".".to_string());
     let preparation_status = RwSignal::new(None::<FingerprintPreparationStatus>);
     let preparing = RwSignal::new(false);
+    let stopping = RwSignal::new(false);
     let job_status = RwSignal::new(None::<FingerprintJobStatus>);
     let running = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
@@ -185,6 +191,7 @@ fn FingerprintPage() -> impl IntoView {
         preparation_status.set(None);
         job_status.set(None);
         error.set(None);
+        stopping.set(false);
         preparing.set(true);
 
         spawn_local(async move {
@@ -201,6 +208,7 @@ fn FingerprintPage() -> impl IntoView {
                             Err(fetch_error) => {
                                 error.set(Some(fetch_error.to_string()));
                                 preparing.set(false);
+                                stopping.set(false);
                                 return;
                             }
                         }
@@ -212,6 +220,23 @@ fn FingerprintPage() -> impl IntoView {
                 Err(start_error) => error.set(Some(start_error.to_string())),
             }
             preparing.set(false);
+            stopping.set(false);
+        });
+    };
+
+    let stop_loading = move |_| {
+        if !preparing.get_untracked() || stopping.get_untracked() {
+            return;
+        }
+        let Some(status) = preparation_status.get_untracked() else {
+            return;
+        };
+        stopping.set(true);
+        spawn_local(async move {
+            if let Err(stop_error) = cancel_fingerprint_preparation(status.job_id).await {
+                error.set(Some(stop_error.to_string()));
+                stopping.set(false);
+            }
         });
     };
 
@@ -286,12 +311,14 @@ fn FingerprintPage() -> impl IntoView {
                 </div>
             </form>
             {move || preparation_status.get().map(|status| {
-                let ready = status.is_complete && status.error.is_none();
+                let ready = status.is_complete && !status.is_cancelled && status.error.is_none();
                 view! {
                     <section class="fingerprint-progress fingerprint-preparation" aria-live="polite">
                         <div class="fingerprint-progress__heading">
                             <h2>{if !status.is_complete {
                                 "Loading directory"
+                            } else if status.is_cancelled {
+                                "Directory loading stopped"
                             } else if ready {
                                 "Directory loaded"
                             } else {
@@ -305,7 +332,17 @@ fn FingerprintPage() -> impl IntoView {
                         </div>
                         {if !status.is_complete {
                             view! {
-                                <progress class="fingerprint-progress__bar" aria-label="Directory loading progress"></progress>
+                                <div class="fingerprint-preparation__activity">
+                                    <progress class="fingerprint-progress__bar" aria-label="Directory loading progress"></progress>
+                                    <button
+                                        class="fingerprint-form__button fingerprint-form__button--stop"
+                                        type="button"
+                                        disabled=move || stopping.get()
+                                        on:click=stop_loading
+                                    >
+                                        {move || if stopping.get() { "Stopping…" } else { "Stop loading" }}
+                                    </button>
+                                </div>
                             }.into_any()
                         } else {
                             ().into_any()
@@ -313,6 +350,11 @@ fn FingerprintPage() -> impl IntoView {
                         <p class="fingerprint-progress__summary">
                             {format!("{} directories and {} files scanned", status.directories_scanned, status.files_scanned)}
                         </p>
+                        {if status.is_cancelled {
+                            view! { <p class="fingerprint-progress__summary">"Loading was stopped. Load the directory again to restart."</p> }.into_any()
+                        } else {
+                            ().into_any()
+                        }}
                         {if ready {
                             view! {
                                 <p class="fingerprint-progress__summary">
@@ -325,7 +367,7 @@ fn FingerprintPage() -> impl IntoView {
                     </section>
                 }
             })}
-            {move || (preparation_status.get().is_some_and(|status| status.is_complete && status.error.is_none())
+            {move || (preparation_status.get().is_some_and(|status| status.is_complete && !status.is_cancelled && status.error.is_none())
                 && job_status.get().is_none()).then(|| view! {
                 <div class="fingerprint-form__actions">
                     <button
@@ -872,8 +914,10 @@ pub async fn start_fingerprint_preparation(
         skipped_existing: 0,
         invalid_count: 0,
         is_complete: false,
+        is_cancelled: false,
         error: None,
     };
+    let cancellation_requested = Arc::new(AtomicBool::new(false));
     {
         let mut jobs = fingerprint_preparation_jobs()
             .lock()
@@ -888,13 +932,32 @@ pub async fn start_fingerprint_preparation(
                 candidate_paths: Vec::new(),
                 invalid_paths: Vec::new(),
                 consumed: false,
+                cancellation_requested: Arc::clone(&cancellation_requested),
                 updated_at: Instant::now(),
             },
         );
     }
 
-    tokio::spawn(prepare_fingerprint_job(job_id, directory));
+    tokio::spawn(prepare_fingerprint_job(
+        job_id,
+        directory,
+        cancellation_requested,
+    ));
     Ok(status)
+}
+
+#[server]
+pub async fn cancel_fingerprint_preparation(job_id: String) -> Result<(), ServerFnError<String>> {
+    let jobs = fingerprint_preparation_jobs()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let entry = jobs.get(&job_id).ok_or_else(|| {
+        ServerFnError::ServerError("Directory preparation job was not found".to_string())
+    })?;
+    if !entry.status.is_complete {
+        entry.cancellation_requested.store(true, Ordering::Relaxed);
+    }
+    Ok(())
 }
 
 #[server]
@@ -912,8 +975,13 @@ pub async fn get_fingerprint_preparation_status(
 }
 
 #[cfg(feature = "ssr")]
-async fn prepare_fingerprint_job(job_id: String, directory: String) {
+async fn prepare_fingerprint_job(
+    job_id: String,
+    directory: String,
+    cancellation_requested: Arc<AtomicBool>,
+) {
     let progress_job_id = job_id.clone();
+    let worker_cancellation = Arc::clone(&cancellation_requested);
     let result = tokio::task::spawn_blocking(move || {
         let root = fs::canonicalize(&directory)
             .map_err(|error| format!("Could not access directory: {error}"))?;
@@ -922,26 +990,37 @@ async fn prepare_fingerprint_job(job_id: String, directory: String) {
         }
 
         let mut discovered = Vec::new();
-        let mut on_entry = |is_directory| {
+        let mut on_entry = |entry_type| {
+            if worker_cancellation.load(Ordering::Relaxed) {
+                return true;
+            }
             let mut jobs = fingerprint_preparation_jobs()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(entry) = jobs.get_mut(&progress_job_id) {
-                if is_directory {
-                    entry.status.directories_scanned += 1;
-                } else {
-                    entry.status.files_scanned += 1;
+                match entry_type {
+                    Some(true) => entry.status.directories_scanned += 1,
+                    Some(false) => entry.status.files_scanned += 1,
+                    None => {}
                 }
                 entry.updated_at = Instant::now();
             }
+            false
         };
         collect_regular_files_with_progress(&root, &mut discovered, &mut on_entry)
             .map_err(|error| format!("Could not scan directory: {error}"))?;
+
+        if worker_cancellation.load(Ordering::Relaxed) {
+            return Err("Directory preparation was stopped".to_string());
+        }
 
         let stored_paths: HashSet<String> = crate::database::existing_fingerprint_paths()
             .map_err(|error| format!("Could not check stored fingerprints: {error}"))?
             .into_iter()
             .collect();
+        if worker_cancellation.load(Ordering::Relaxed) {
+            return Err("Directory preparation was stopped".to_string());
+        }
         Ok::<_, String>(partition_existing_paths(discovered, &stored_paths))
     })
     .await
@@ -952,15 +1031,22 @@ async fn prepare_fingerprint_job(job_id: String, directory: String) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(entry) = jobs.get_mut(&job_id) {
-        match result {
-            Ok((candidate_paths, skipped_existing, invalid_paths)) => {
-                entry.status.candidate_count = candidate_paths.len();
-                entry.status.skipped_existing = skipped_existing;
-                entry.status.invalid_count = invalid_paths.len();
-                entry.candidate_paths = candidate_paths;
-                entry.invalid_paths = invalid_paths;
+        let cancelled = cancellation_requested.load(Ordering::Relaxed);
+        if cancelled {
+            entry.status.is_cancelled = true;
+            entry.candidate_paths.clear();
+            entry.invalid_paths.clear();
+        } else {
+            match result {
+                Ok((candidate_paths, skipped_existing, invalid_paths)) => {
+                    entry.status.candidate_count = candidate_paths.len();
+                    entry.status.skipped_existing = skipped_existing;
+                    entry.status.invalid_count = invalid_paths.len();
+                    entry.candidate_paths = candidate_paths;
+                    entry.invalid_paths = invalid_paths;
+                }
+                Err(error) => entry.status.error = Some(error),
             }
-            Err(error) => entry.status.error = Some(error),
         }
         entry.status.is_complete = true;
         entry.updated_at = Instant::now();
@@ -1051,17 +1137,24 @@ pub async fn get_fingerprint_job_status(
 fn collect_regular_files_with_progress(
     directory: &Path,
     files: &mut Vec<PathBuf>,
-    on_entry: &mut dyn FnMut(bool),
+    on_entry: &mut dyn FnMut(Option<bool>) -> bool,
 ) -> std::io::Result<()> {
-    on_entry(true);
+    if on_entry(Some(true)) {
+        return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+    }
     for entry in fs::read_dir(directory)? {
+        if on_entry(None) {
+            return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+        }
         let entry = entry?;
         let file_type = entry.file_type()?;
         let path = entry.path();
         if file_type.is_dir() {
             collect_regular_files_with_progress(&path, files, on_entry)?;
         } else if file_type.is_file() {
-            on_entry(false);
+            if on_entry(Some(false)) {
+                return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+            }
             files.push(path);
         }
     }
@@ -1418,12 +1511,13 @@ mod fingerprint_tests {
 
         let mut discovered = Vec::new();
         let (mut directories_scanned, mut files_scanned) = (0, 0);
-        collect_regular_files_with_progress(&root, &mut discovered, &mut |is_directory| {
-            if is_directory {
-                directories_scanned += 1;
-            } else {
-                files_scanned += 1;
+        collect_regular_files_with_progress(&root, &mut discovered, &mut |entry_type| {
+            match entry_type {
+                Some(true) => directories_scanned += 1,
+                Some(false) => files_scanned += 1,
+                None => {}
             }
+            false
         })
         .unwrap();
         let stored = HashSet::from([existing.to_str().unwrap().to_string()]);
@@ -1437,6 +1531,26 @@ mod fingerprint_tests {
         assert!(!is_audio_file(&non_audio));
         assert!(is_audio_file(Path::new("track.MP3")));
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn directory_discovery_stops_when_cancellation_is_requested() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("impresario-cancel-{unique}"));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("track.mp3"), b"audio placeholder").unwrap();
+
+        let mut discovered = Vec::new();
+        let result = collect_regular_files_with_progress(&root, &mut discovered, &mut |entry| {
+            matches!(entry, Some(false))
+        });
+
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Interrupted);
+        assert!(discovered.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 }
