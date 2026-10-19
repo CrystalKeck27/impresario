@@ -4,6 +4,9 @@ pub mod app;
 pub mod schema;
 
 #[cfg(feature = "ssr")]
+pub mod database;
+
+#[cfg(feature = "ssr")]
 pub const MIGRATIONS: diesel_migrations::EmbeddedMigrations =
     diesel_migrations::embed_migrations!("migrations");
 

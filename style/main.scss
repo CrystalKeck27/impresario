@@ -69,6 +69,134 @@ main {
 	cursor: pointer;
 }
 
+.fingerprint-page {
+	width: min(100%, 64rem);
+	margin: 0 auto;
+}
+
+.fingerprint-page__header {
+	margin-bottom: 1.5rem;
+}
+
+.fingerprint-page h1 {
+	margin: 0 0 0.5rem;
+}
+
+.fingerprint-page__header p {
+	margin: 0;
+	color: #486581;
+}
+
+.fingerprint-form {
+	display: grid;
+	gap: 0.5rem;
+	padding: 1rem;
+	border: 1px solid #bcccdc;
+	border-radius: 0.75rem;
+	background: #fff;
+	box-shadow: 0 10px 30px rgba(16, 42, 67, 0.08);
+}
+
+.fingerprint-form__label {
+	font-weight: 600;
+}
+
+.fingerprint-form__controls {
+	display: flex;
+	gap: 0.75rem;
+}
+
+.fingerprint-form__input {
+	flex: 1;
+	min-width: 0;
+	padding: 0.75rem 0.9rem;
+	border: 1px solid #9fb3c8;
+	border-radius: 0.5rem;
+	font: inherit;
+}
+
+.fingerprint-form__button {
+	padding: 0.75rem 1.2rem;
+	border: 0;
+	border-radius: 0.5rem;
+	background: #0f4c81;
+	color: #fff;
+	font: inherit;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.fingerprint-form__button:disabled {
+	background: #627d98;
+	cursor: wait;
+}
+
+.fingerprint-progress {
+	margin-top: 1.25rem;
+	padding: 1rem;
+	border: 1px solid #d9e2ec;
+	border-radius: 0.75rem;
+	background: #fff;
+	box-shadow: 0 10px 30px rgba(16, 42, 67, 0.08);
+}
+
+.fingerprint-progress__heading {
+	display: flex;
+	justify-content: space-between;
+	gap: 1rem;
+	align-items: center;
+}
+
+.fingerprint-progress__heading h2 {
+	margin: 0;
+	font-size: 1.15rem;
+}
+
+.fingerprint-progress__heading span {
+	font-weight: 700;
+	color: #0f4c81;
+}
+
+.fingerprint-progress__bar {
+	display: block;
+	width: 100%;
+	height: 1rem;
+	margin-top: 1rem;
+	accent-color: #0f7b6c;
+}
+
+.fingerprint-progress__summary {
+	margin: 0.75rem 0 0;
+	color: #334e68;
+	line-height: 1.5;
+}
+
+.fingerprint-progress__errors {
+	margin-top: 1rem;
+	color: #8a2c2c;
+}
+
+.fingerprint-progress__errors ul {
+	max-height: 14rem;
+	overflow: auto;
+	padding-left: 1.25rem;
+	line-height: 1.5;
+}
+
+.fingerprint-page__error {
+	padding: 0.75rem 1rem;
+	border-left: 4px solid #ba2525;
+	background: #fff5f5;
+	color: #8a2c2c;
+}
+
+.home-page__link {
+	display: inline-block;
+	margin-left: 0.75rem;
+	color: #0f4c81;
+	font-weight: 600;
+}
+
 .explorer-view {
 	width: min(100%, 72rem);
 	margin: 0 auto;
@@ -254,6 +382,14 @@ main {
 	}
 
 	.root-path-form__button {
+		width: 100%;
+	}
+
+	.fingerprint-form__controls {
+		flex-direction: column;
+	}
+
+	.fingerprint-form__button {
 		width: 100%;
 	}
 

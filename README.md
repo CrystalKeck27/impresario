@@ -40,7 +40,7 @@ The server uses Chromaprint's `fpcalc` executable to fingerprint selected audio 
 
 ## Local PostgreSQL database
 
-The repository includes a PostgreSQL service for development. The Leptos app still runs on the host; this service only provides the database and is not yet connected to the app.
+The repository includes a PostgreSQL service for development. The Leptos app runs on the host and uses PostgreSQL when the directory fingerprinting feature is started.
 
 Enter the Nix development shell to get the Docker CLI and Compose v2 plugin, Podman and its Compose provider, and PostgreSQL client tools. Nix supplies command-line tools, but it does not install or start a container runtime or configure host permissions. Install and enable Docker Engine (including its Compose plugin) or Podman on the host first. On macOS and Windows, the runtime generally needs its own VM. The current flake development shell targets x86_64 Linux.
 
@@ -65,7 +65,9 @@ The PostgreSQL schema is available both as `scripts/create-tables.sql` and as a 
 DATABASE_URL="$(grep '^DATABASE_URL=' .env | cut -d= -f2-)" diesel migration run
 ```
 
-The checked-in Diesel table definitions are in `src/schema.rs`. The application does not automatically connect to PostgreSQL or run migrations.
+The checked-in Diesel table definitions are in `src/schema.rs`. Set `DATABASE_URL` in the server environment; the app creates its connection pool when a fingerprint scan is requested. Apply migrations manually with Diesel CLI as shown above. The app does not run migrations automatically, and the database must already contain the fingerprint tables.
+
+The `/fingerprint` page recursively scans regular files under the supplied directory, skips canonical paths that already have an AcoustID fingerprint row, and runs up to eight `fpcalc` processes concurrently. Each successful result is stored in `acoustid_fingerprints`; file paths are stored in `impresario_files`. Progress is polled while the server-side job runs. Install Chromaprint so `fpcalc` is available on the server `PATH`. Directory paths are server-side filesystem paths, so expose this feature only to trusted users or add an allowed-root policy before public deployment.
 
 Use `podman compose` instead of `docker compose` for the equivalent Podman commands. Podman's `compose` command delegates to an external provider; this dev shell includes `podman-compose`. If provider selection is ambiguous, set `PODMAN_COMPOSE_PROVIDER=podman-compose` for the command.
 
@@ -121,8 +123,9 @@ export LEPTOS_SITE_PKG_DIR="pkg"
 export LEPTOS_SITE_ADDR="127.0.0.1:3000"
 export LEPTOS_RELOAD_PORT="3001"
 export ACOUSTID_APPLICATION_KEY="your-acoustid-application-key"
+export DATABASE_URL="postgres://user:password@host:5432/database"
 ```
-Install Chromaprint so `fpcalc` is available on the server's `PATH`, then run the server binary.
+Apply the Diesel migration before starting fingerprint scans. Install Chromaprint so `fpcalc` is available on the server's `PATH`, then run the server binary.
 
 ## Licensing
 

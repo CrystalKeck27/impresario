@@ -3,6 +3,7 @@ import { test, expect } from "@playwright/test";
 const baseRoutes = [
   { path: "/", heading: "Welcome to Leptos!" },
   { path: "/files", heading: "Files Page" },
+  { path: "/fingerprint", heading: "Fingerprint a directory" },
 ];
 
 for (const route of baseRoutes) {
@@ -19,6 +20,10 @@ for (const route of baseRoutes) {
     await expect(page.locator("h1")).toHaveText(route.heading);
     if (route.path === "/") {
       await expect(page).toHaveTitle("Welcome to Leptos");
+    }
+    if (route.path === "/fingerprint") {
+      await expect(page.getByLabel("Directory path")).toBeVisible();
+      await expect(page.getByRole("button", { name: "Start fingerprinting" })).toBeVisible();
     }
     expect(errors, `Browser errors on ${route.path}`).toEqual([]);
   });
