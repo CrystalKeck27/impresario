@@ -69,6 +69,18 @@ pub struct FingerprintPreparationStatus {
     pub error: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcoustidLookupJobStatus {
+    pub job_id: String,
+    pub total: usize,
+    pub completed: usize,
+    pub matched_files: usize,
+    pub no_matches: usize,
+    pub failed: usize,
+    pub errors: Vec<String>,
+    pub is_complete: bool,
+}
+
 #[cfg(feature = "ssr")]
 struct FingerprintJobEntry {
     status: FingerprintJobStatus,
@@ -100,6 +112,21 @@ static FINGERPRINT_PREPARATION_JOBS: OnceLock<Mutex<HashMap<String, FingerprintP
 #[cfg(feature = "ssr")]
 fn fingerprint_preparation_jobs() -> &'static Mutex<HashMap<String, FingerprintPreparationEntry>> {
     FINGERPRINT_PREPARATION_JOBS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(feature = "ssr")]
+struct AcoustidLookupJobEntry {
+    status: AcoustidLookupJobStatus,
+    updated_at: Instant,
+}
+
+#[cfg(feature = "ssr")]
+static ACOUSTID_LOOKUP_JOBS: OnceLock<Mutex<HashMap<String, AcoustidLookupJobEntry>>> =
+    OnceLock::new();
+
+#[cfg(feature = "ssr")]
+fn acoustid_lookup_jobs() -> &'static Mutex<HashMap<String, AcoustidLookupJobEntry>> {
+    ACOUSTID_LOOKUP_JOBS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[cfg(feature = "hydrate")]
@@ -148,6 +175,7 @@ pub fn App() -> impl IntoView {
                     <Route path=StaticSegment("") view=HomePage/>
                     <Route path=StaticSegment("files") view=FilesPage/>
                     <Route path=StaticSegment("fingerprint") view=FingerprintPage/>
+                    <Route path=StaticSegment("acoustid") view=AcoustidPage/>
                 </Routes>
             </main>
         </Router>
@@ -166,6 +194,7 @@ fn HomePage() -> impl IntoView {
         <button on:click=on_click>"Click Me: " {count}</button>
         <a href="/files"><button>"Files"</button></a>
         <a class="home-page__link" href="/fingerprint">"Fingerprint a directory"</a>
+        <a class="home-page__link" href="/acoustid">"Find AcoustID matches"</a>
     }
 }
 
@@ -421,6 +450,112 @@ fn FingerprintPage() -> impl IntoView {
                     }.into_any()
                 }
             }}
+        </section>
+    }
+}
+
+#[component]
+fn AcoustidPage() -> impl IntoView {
+    use leptos::task::spawn_local;
+
+    let status = RwSignal::new(None::<AcoustidLookupJobStatus>);
+    let running = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+
+    let start_lookup = move |_| {
+        if running.get_untracked() {
+            return;
+        }
+        status.set(None);
+        error.set(None);
+        running.set(true);
+
+        spawn_local(async move {
+            match start_acoustid_lookup_job().await {
+                Ok(mut current) => {
+                    status.set(Some(current.clone()));
+                    while !current.is_complete {
+                        fingerprint_poll_delay().await;
+                        match get_acoustid_lookup_job_status(current.job_id.clone()).await {
+                            Ok(updated) => {
+                                current = updated;
+                                status.set(Some(current.clone()));
+                            }
+                            Err(fetch_error) => {
+                                error.set(Some(fetch_error.to_string()));
+                                running.set(false);
+                                return;
+                            }
+                        }
+                    }
+                }
+                Err(start_error) => error.set(Some(start_error.to_string())),
+            }
+            running.set(false);
+        });
+    };
+
+    view! {
+        <section class="fingerprint-page">
+            <header class="fingerprint-page__header">
+                <h1>"Find AcoustID matches"</h1>
+                <p>"Check stored audio fingerprints against AcoustID and save every valid match. Files with existing matches are skipped."</p>
+            </header>
+            <div class="fingerprint-form">
+                <p>"This may take a while for a large library. The page will update as each fingerprint is checked."</p>
+                <div class="fingerprint-form__actions">
+                    <button
+                        class="fingerprint-form__button"
+                        type="button"
+                        disabled=move || running.get()
+                        on:click=start_lookup
+                    >
+                        {move || if running.get() { "Checking AcoustID…" } else { "Check unmatched fingerprints" }}
+                    </button>
+                </div>
+            </div>
+            {move || error.get().map(|message| view! {
+                <p class="fingerprint-page__error" role="alert">{message}</p>
+            })}
+            {move || status.get().map(|current| {
+                let percentage = current.completed
+                    .saturating_mul(100)
+                    .checked_div(current.total)
+                    .unwrap_or(if current.is_complete { 100 } else { 0 });
+                view! {
+                    <section class="fingerprint-progress" aria-live="polite">
+                        <div class="fingerprint-progress__heading">
+                            <h2>{if current.is_complete { "AcoustID lookup complete" } else { "Checking fingerprints" }}</h2>
+                            <span>{format!("{percentage}%")}</span>
+                        </div>
+                        <progress
+                            class="fingerprint-progress__bar"
+                            max=current.total.max(1)
+                            value=current.completed
+                            aria-label="AcoustID lookup progress"
+                        ></progress>
+                        {if current.total == 0 && current.is_complete {
+                            view! { <p class="fingerprint-progress__summary">"No fingerprints without an existing AcoustID match were found."</p> }.into_any()
+                        } else {
+                            view! {
+                                <p class="fingerprint-progress__summary">
+                                    {format!("{} of {} checked · {} with matches · {} with no matches · {} failed", current.completed, current.total, current.matched_files, current.no_matches, current.failed)}
+                                </p>
+                            }.into_any()
+                        }}
+                        {if current.errors.is_empty() {
+                            ().into_any()
+                        } else {
+                            view! {
+                                <details class="fingerprint-progress__errors">
+                                    <summary>{format!("{} fingerprint(s) failed; showing {} error details", current.failed, current.errors.len())}</summary>
+                                    <ul>{current.errors.into_iter().map(|item| view! { <li>{item}</li> }).collect::<Vec<_>>()}</ul>
+                                </details>
+                            }.into_any()
+                        }}
+                    </section>
+                }
+            })}
         </section>
     }
 }
@@ -1133,6 +1268,200 @@ pub async fn get_fingerprint_job_status(
         .ok_or_else(|| ServerFnError::ServerError("Fingerprint job was not found".to_string()))
 }
 
+#[server]
+pub async fn start_acoustid_lookup_job() -> Result<AcoustidLookupJobStatus, ServerFnError<String>> {
+    if std::env::var("ACOUSTID_APPLICATION_KEY")
+        .ok()
+        .is_none_or(|key| key.trim().is_empty())
+    {
+        return Err(ServerFnError::ServerError(
+            "ACOUSTID_APPLICATION_KEY is not set on the server".to_string(),
+        ));
+    }
+
+    let fingerprints = tokio::task::spawn_blocking(crate::database::fingerprints_without_matches)
+        .await
+        .map_err(|error| ServerFnError::ServerError(format!("Database worker failed: {error}")))?
+        .map_err(ServerFnError::ServerError)?;
+
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let status = AcoustidLookupJobStatus {
+        job_id: job_id.clone(),
+        total: fingerprints.len(),
+        completed: 0,
+        matched_files: 0,
+        no_matches: 0,
+        failed: 0,
+        errors: Vec::new(),
+        is_complete: fingerprints.is_empty(),
+    };
+
+    {
+        let mut jobs = acoustid_lookup_jobs()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        jobs.retain(|_, entry| {
+            !entry.status.is_complete || entry.updated_at.elapsed().as_secs() < 3600
+        });
+        if jobs.values().any(|entry| !entry.status.is_complete) {
+            return Err(ServerFnError::ServerError(
+                "An AcoustID lookup job is already running".to_string(),
+            ));
+        }
+        jobs.insert(
+            job_id.clone(),
+            AcoustidLookupJobEntry {
+                status: status.clone(),
+                updated_at: Instant::now(),
+            },
+        );
+    }
+
+    if !fingerprints.is_empty() {
+        tokio::spawn(run_acoustid_lookup_job(job_id, fingerprints));
+    }
+    Ok(status)
+}
+
+#[server]
+pub async fn get_acoustid_lookup_job_status(
+    job_id: String,
+) -> Result<AcoustidLookupJobStatus, ServerFnError<String>> {
+    let jobs = acoustid_lookup_jobs()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    jobs.get(&job_id)
+        .map(|entry| entry.status.clone())
+        .ok_or_else(|| ServerFnError::ServerError("AcoustID lookup job was not found".to_string()))
+}
+
+#[cfg(feature = "ssr")]
+async fn run_acoustid_lookup_job(
+    job_id: String,
+    fingerprints: Vec<crate::database::StoredFingerprint>,
+) {
+    use tokio::task::JoinSet;
+
+    let concurrency = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(2)
+        .clamp(1, 4);
+    let mut pending = fingerprints.into_iter();
+    let mut tasks = JoinSet::new();
+
+    for _ in 0..concurrency {
+        if let Some(record) = pending.next() {
+            tasks.spawn(async move { process_stored_fingerprint(record).await });
+        }
+    }
+
+    while let Some(result) = tasks.join_next().await {
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(error) => Err(format!("AcoustID worker failed: {error}")),
+        };
+        let mut jobs = acoustid_lookup_jobs()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = jobs.get_mut(&job_id) {
+            entry.status.completed += 1;
+            match outcome {
+                Ok(true) => entry.status.matched_files += 1,
+                Ok(false) => entry.status.no_matches += 1,
+                Err(message) => {
+                    entry.status.failed += 1;
+                    if entry.status.errors.len() < 10 {
+                        entry.status.errors.push(message);
+                    }
+                }
+            }
+            entry.updated_at = Instant::now();
+        }
+        drop(jobs);
+
+        if let Some(record) = pending.next() {
+            tasks.spawn(async move { process_stored_fingerprint(record).await });
+        }
+    }
+
+    let mut jobs = acoustid_lookup_jobs()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(entry) = jobs.get_mut(&job_id) {
+        entry.status.is_complete = true;
+        entry.updated_at = Instant::now();
+    }
+}
+
+#[cfg(feature = "ssr")]
+async fn process_stored_fingerprint(
+    record: crate::database::StoredFingerprint,
+) -> Result<bool, String> {
+    use std::collections::HashMap;
+
+    let fingerprint = String::from_utf8(record.fingerprint)
+        .map_err(|error| format!("Stored fingerprint is not valid UTF-8: {error}"))?;
+    if record.duration_seconds <= 0 {
+        return Err("Stored fingerprint has an invalid duration".to_string());
+    }
+    let matches =
+        lookup_stored_acoustid_matches(&fingerprint, record.duration_seconds as u32).await?;
+    if matches.is_empty() {
+        return Ok(false);
+    }
+
+    // Deduplicate IDs returned more than once to avoid a duplicate-key error
+    // when inserting one batch of results.
+    let matches = matches
+        .into_iter()
+        .collect::<HashMap<_, _>>()
+        .into_iter()
+        .collect();
+    let impresario_id = record.impresario_id;
+    tokio::task::spawn_blocking(move || {
+        crate::database::store_acoustid_matches(impresario_id, matches)
+    })
+    .await
+    .map_err(|error| format!("Database worker failed: {error}"))??;
+    Ok(true)
+}
+
+#[cfg(feature = "ssr")]
+async fn lookup_stored_acoustid_matches(
+    fingerprint: &str,
+    duration_seconds: u32,
+) -> Result<Vec<(uuid::Uuid, f32)>, String> {
+    use acoustid::{AcoustIDClient, Metadata};
+
+    let key = std::env::var("ACOUSTID_APPLICATION_KEY")
+        .ok()
+        .filter(|key| !key.trim().is_empty())
+        .ok_or_else(|| "ACOUSTID_APPLICATION_KEY is not set on the server".to_string())?;
+    let client = AcoustIDClient::with_application_key(key)
+        .map_err(|error| format!("Could not create AcoustID client: {error}"))?;
+    let response = client
+        .lookup_by_fingerprint(duration_seconds, fingerprint, &[Metadata::RecordingIds])
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(valid_acoustid_matches(response.results))
+}
+
+#[cfg(feature = "ssr")]
+fn valid_acoustid_matches(results: Vec<acoustid::LookupResult>) -> Vec<(uuid::Uuid, f32)> {
+    results
+        .into_iter()
+        .filter_map(|result| {
+            let id = uuid::Uuid::parse_str(result.id.as_deref()?).ok()?;
+            let score = result.score?;
+            if !score.is_finite() {
+                return None;
+            }
+            let score = score as f32;
+            score.is_finite().then_some((id, score))
+        })
+        .collect()
+}
+
 #[cfg(feature = "ssr")]
 fn collect_regular_files_with_progress(
     directory: &Path,
@@ -1433,7 +1762,7 @@ fn best_acoustid_match(results: Vec<acoustid::LookupResult>) -> Option<AcoustidM
 
 #[cfg(all(test, feature = "ssr"))]
 mod acoustid_match_tests {
-    use super::best_acoustid_match;
+    use super::{best_acoustid_match, valid_acoustid_matches};
 
     fn map_response(json: &str) -> Option<super::AcoustidMatch> {
         let response: acoustid::ApiResponse = serde_json::from_str(json).unwrap();
@@ -1471,6 +1800,36 @@ mod acoustid_match_tests {
         .unwrap();
         assert_eq!(result.acoustid_id.as_deref(), Some("track"));
         assert_eq!(result.recording_id, None);
+    }
+
+    #[test]
+    fn keeps_all_matches_with_valid_ids_and_finite_float_scores() {
+        let response: acoustid::ApiResponse = serde_json::from_str(
+            r#"{
+            "status":"ok",
+            "results":[
+                {"id":"550e8400-e29b-41d4-a716-446655440000","score":0.91},
+                {"id":"550e8400-e29b-41d4-a716-446655440001","score":0.75},
+                {"id":"not-a-uuid","score":0.8},
+                {"id":"550e8400-e29b-41d4-a716-446655440002"},
+                {"id":"550e8400-e29b-41d4-a716-446655440003","score":1e99}
+            ]
+        }"#,
+        )
+        .unwrap();
+
+        let matches = valid_acoustid_matches(response.results);
+        assert_eq!(matches.len(), 2);
+        assert_eq!(
+            matches[0].0.to_string(),
+            "550e8400-e29b-41d4-a716-446655440000"
+        );
+        assert_eq!(matches[0].1, 0.91_f32);
+        assert_eq!(
+            matches[1].0.to_string(),
+            "550e8400-e29b-41d4-a716-446655440001"
+        );
+        assert_eq!(matches[1].1, 0.75_f32);
     }
 }
 
